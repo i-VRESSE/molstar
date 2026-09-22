@@ -25,7 +25,8 @@ In scope for the first version:
 - Apply a curated representation preset.
 - Apply a curated color theme or default/illustrative appearance.
 - Report exactly which commands succeeded or failed.
-- Keep all model-provider credentials outside the browser.
+- Let each user configure an OpenAI-compatible endpoint, model, and optional API token in the chat UI.
+- Persist provider settings in browser `localStorage` so the application can be hosted as static files, including on GitHub Pages.
 
 Deferred until the command boundary is stable:
 
@@ -33,6 +34,7 @@ Deferred until the command boundary is stable:
 - Arbitrary MolScript supplied by a model.
 - Voice input, image input, and retrieval-augmented scientific answers.
 - Autonomous multi-step loops that inspect a result and decide on more mutations.
+- Running a small language model entirely in the browser as an alternative provider.
 
 ## Repository Findings
 
@@ -65,7 +67,7 @@ The least invasive first implementation is a `PluginBehavior` in `src/extensions
 - `compileIdListSelection` in `src/mol-script/util/id-list.ts` can support familiar author/label residue-list syntax if that syntax is exposed directly in a later command version.
 - Selection changes are managed separately from the data-state undo stack. The chat response must not claim that data-state Undo will reverse a selection unless selection snapshot/restore is implemented for that command.
 
-Use schema-based selection for explicit chain/residue/atom requests and the built-in query registry for named concepts. Do not accept serialized MolScript expressions from the server in v1.
+Use schema-based selection for explicit chain/residue/atom requests and the built-in query registry for named concepts. Do not accept serialized MolScript expressions from the model in v1.
 
 ### Representations And Styles
 
@@ -82,11 +84,11 @@ Use schema-based selection for explicit chain/residue/atom requests and the buil
 ChatControls (React)
     |
     v
-ChatController (conversation, cancellation, status)
+useChat (@ai-sdk/react: conversation, cancellation, request status)
     |
-    +--> ChatClient --> application backend --> model provider
-    |                        ^
-    |                        | system prompt + JSON schema + context summary
+    +--> MolstarChatTransport --> AI SDK Core --> @ai-sdk/openai --> OpenAI-compatible endpoint
+    |                                                   ^
+    |                                                   | system prompt + JSON schema + context summary
     v
 validateChatResponse (untrusted JSON -> typed commands)
     |
@@ -101,102 +103,73 @@ ChatCommandExecutor (sequential, deterministic)
 
 Responsibilities must remain separated:
 
-- The backend owns provider credentials, model selection, rate limiting, request limits, and provider-specific tool/structured-output syntax.
-- `ChatClient` only sends conversation plus a compact Viewer context and receives provider-neutral JSON.
+- The settings UI owns endpoint, model, and optional token configuration and persists them in browser `localStorage`.
+- `MolstarChatTransport` translates AI SDK UI messages plus compact Viewer context into a structured AI SDK generation request and receives provider-neutral JSON.
 - The validator treats every response as untrusted input, rejects unknown fields/commands, enforces lengths and numeric bounds, and normalizes identifiers.
 - The executor contains all Mol*-specific mutation logic and never performs a command not represented by the local TypeScript union.
-- The UI renders conversation/status and has no molecular-operation logic.
+- `@ai-sdk/react` owns chat messages, submission, cancellation, retries, and request status; the UI renders that state and contains no molecular-operation logic.
 
-Keep the backend contract vendor-neutral. The repository can include an interface and documented HTTP contract without embedding an OpenAI, Anthropic, or other provider SDK in the Mol* bundle.
+Use `@ai-sdk/openai` as the provider adapter and `@ai-sdk/react` for chat state. The AI SDK core `ai` package is also required by those integrations for structured generation, UI message types, and transport primitives. The configured provider must expose an OpenAI-compatible `/chat/completions` API and permit browser requests with CORS.
 
-### Backend And Model Adapter Decision
+### Browser Provider Configuration
 
-Implement the reference backend in TypeScript on Node.js 22 using Express, matching the existing server stack in this repository. Put it under `src/servers/chat` and use the built-in `fetch` implementation rather than adding a provider SDK.
+Implement the provider factory in `src/extensions/chat/client.ts` with `createOpenAI` from `@ai-sdk/openai`. Pass the user settings as `baseURL` and `apiKey`, inject a guarded browser `fetch`, and always select `provider.chat(model)` because generic compatible endpoints commonly implement Chat Completions but not OpenAI's Responses API. The dedicated application remains static and has no required Mol* chat server.
 
-Use one `OpenAICompatibleChatProvider` adapter that calls the non-streaming `/chat/completions` API. The adapter takes its base URL, model, and optional API key only from server startup configuration. The browser request must never select a provider, base URL, or model.
+The user-configurable settings are:
 
-Support these initial configurations:
+- **Endpoint:** an HTTPS OpenAI-compatible API base URL, for example `https://openrouter.ai/api/v1`; allow loopback HTTP endpoints such as `http://127.0.0.1:11434/v1` for local development.
+- **Model:** the provider model identifier sent in the request. Do not ship a default hosted model because availability changes independently of Mol*.
+- **API token:** optional bearer token for hosted endpoints or authenticated local gateways.
 
-- **OpenRouter (recommended hosted default):** base URL `https://openrouter.ai/api/v1`, API key required, and a server-configured model identifier. Request strict JSON Schema structured output and require a route that supports the requested parameters.
-- **Ollama (recommended local development option):** base URL `http://127.0.0.1:11434/v1`, no API key, and an explicitly configured installed model. Use Ollama's OpenAI-compatible `response_format` support with the same JSON Schema.
-- **Generic OpenAI-compatible endpoint:** an explicitly configured base URL, optional API key, and model. This covers other self-hosted runtimes without adding provider-specific code, provided they support chat completions and JSON Schema structured output.
+Normalize the endpoint by removing trailing slashes and append `/chat/completions`. Validate the final URL before saving. Do not accept endpoint or token through query parameters because URLs leak through history, logs, and referrers.
 
-Suggested server environment variables:
+Store the settings under one versioned `localStorage` key, for example:
 
-```text
-MOLSTAR_CHAT_PROVIDER=openrouter|ollama|openai-compatible
-MOLSTAR_CHAT_BASE_URL=https://openrouter.ai/api/v1
-MOLSTAR_CHAT_MODEL=<provider model identifier>
-MOLSTAR_CHAT_API_KEY=<server-side secret; omitted for Ollama>
-MOLSTAR_CHAT_PORT=1340
-```
-
-For the convenience CLI, command-line options override corresponding non-secret environment values; secrets remain environment-only. A host-integrated server may use environment variables or its own typed configuration mechanism.
-
-`MOLSTAR_CHAT_PROVIDER` selects a checked configuration preset; it is not supplied by the browser. For `openrouter`, ignore or reject a custom base URL so the API key cannot be sent to another host. For `ollama`, default to loopback and require an explicit server-side opt-in before connecting to a non-loopback address. For the generic preset, treat the configured endpoint as trusted deployment configuration and never derive it from a request.
-
-Define a narrow internal interface so provider transport remains replaceable:
-
-```ts
-interface ChatModelProvider {
-    complete(request: ChatModelRequest, signal: AbortSignal): Promise<unknown>
+```json
+{
+  "version": 1,
+  "endpoint": "https://openrouter.ai/api/v1",
+  "model": "provider/model",
+  "apiToken": "optional-token"
 }
 ```
 
-The route builds the system prompt and provider request itself, passes the `ChatResponseV1` JSON Schema as a strict structured-output constraint, parses the returned message content as JSON, and validates it with the same logical V1 validator used by the browser. Structured output is an additional reliability layer, not a substitute for validation.
+Read and validate this value defensively. Invalid or obsolete settings should open the configuration UI instead of breaking application startup. Provide Save, Test Connection, and Clear Settings actions. Clearing settings must remove the token from storage and in-memory client state.
 
-Start without streaming, tool-calling loops, automatic provider fallback, or an LLM framework. The operation is a single constrained translation from conversation plus Viewer context to `ChatResponseV1`; direct HTTP keeps that boundary visible and testable. Add a second provider implementation only if a provider cannot conform to the OpenAI-compatible structured-output contract.
+The token is necessarily visible to JavaScript running on the page and to anyone with access to that browser profile. The settings UI must state this clearly. `localStorage` is chosen for user convenience, not secret storage. The static deployment must avoid third-party scripts, use a restrictive Content Security Policy where the host supports it, and treat XSS prevention as credential protection. Recommend scoped, revocable, low-limit tokens and local endpoints. Never log, render, include in Mol* snapshots, or attach the token to requests sent anywhere except the configured endpoint.
 
-### Local CLI And Distribution Decision
+Keep a narrow model boundary around the AI SDK language model so an in-browser implementation can be added later:
 
-Publish a separate npm package named `molstar-chat` with a `molstar-chat` executable. This is required for the intended zero-install command to resolve by package name:
-
-```bash
-pnpx molstar-chat
+```ts
+interface ChatModelFactory {
+    create(settings: ChatProviderSettings): LanguageModel
+}
 ```
 
-Also document the equivalent `pnpm dlx molstar-chat` and `npx molstar-chat` commands. Adding only a `molstar-chat` bin entry to the existing `molstar` package would instead require users to name or install the `molstar` package, so it does not satisfy this entry-point requirement.
+The custom AI SDK chat transport builds the system prompt and generation request and uses AI SDK Core structured output (`generateText` with `Output.object`) with the `ChatResponseV1` JSON Schema. It then validates the returned object again with the local strict validator before exposing it to the executor. Structured output is an additional reliability layer, not a substitute for validation. To support smaller OpenAI-compatible runtimes, capability negotiation may fall back from strict schema mode to JSON mode, then to prompt-constrained JSON if the endpoint explicitly rejects the stronger mode. Cache the working mode per endpoint/model and show it in settings; never weaken local validation.
 
-The package is a thin local application distribution containing:
+Start without streaming, tool-calling loops, automatic provider fallback, or an LLM framework. The operation is a single constrained translation from conversation plus Viewer context to `ChatResponseV1`; direct HTTP keeps that boundary visible and testable.
 
-- The compiled Node chat server and CLI.
-- A production build of the `src/apps/molstar-chat` application with its endpoint fixed to the same-origin `/api/molstar/chat` route.
-- The static assets needed to run without cloning this repository or installing a separate web server.
+### Static Hosting And CORS
 
-On startup, the executable should:
+Build `src/apps/molstar-chat` as static assets under `build/molstar-chat`. Configure asset URLs and routing so the application works from a GitHub Pages project subpath such as `/molstar/`, not only from the origin root. No server route or runtime environment variables are required.
 
-1. Parse and validate CLI options and environment configuration.
-2. Resolve the provider and model as described below.
-3. Bind the combined static-file and chat API server to `127.0.0.1` by default.
-4. Select the requested port, or an available local port when the default is occupied.
-5. Print the local URL and open it in the default browser after the server is listening.
-6. Keep running until interrupted, then close the HTTP server and abort outstanding model requests cleanly.
+Direct provider access depends on provider CORS policy. The configured endpoint must allow the application's origin, the `POST` method, `Content-Type`, and `Authorization` when a token is used. The UI should recognize likely CORS/network failures and explain that the endpoint must enable browser access; it must not suggest disabling browser security. A local Ollama or compatible server may require explicit allowed-origin configuration.
 
-The zero-argument `pnpx molstar-chat` path targets local Ollama. It probes the loopback Ollama service and discovers installed models. If exactly one model is installed, use it; if several are installed and stdin is interactive, ask the user to choose; if none are installed, Ollama is unavailable, or the process is non-interactive with an ambiguous choice, exit with a concise command showing how to resolve the problem. Do not automatically download a model because model downloads are large and hardware-dependent.
+GitHub Pages serves over HTTPS. Browsers will block an insecure remote HTTP endpoint as mixed content; only loopback HTTP should be presented as a development option, and browser behavior may still vary. Hosted endpoints should use HTTPS.
 
-Hosted OpenRouter usage is explicit:
+Document two example configurations:
 
-```bash
-MOLSTAR_CHAT_API_KEY=<key> pnpx molstar-chat \
-    --provider openrouter \
-    --model <provider/model>
-```
+- OpenRouter or another browser-enabled hosted OpenAI-compatible endpoint with a user-supplied, scoped token and model.
+- Local Ollama or another local runtime with its OpenAI-compatible API and allowed origins configured, normally without a token.
 
-Do not accept an API key as a command-line option because command arguments may be retained in shell history or exposed through process inspection. Read it from `MOLSTAR_CHAT_API_KEY` or a host application's secret mechanism. The CLI may accept non-secret options including:
+### In-Browser Model Stretch Goal
 
-```text
---provider ollama|openrouter|openai-compatible
---model <identifier>
---base-url <url>             # generic provider only
---host <address>             # default: 127.0.0.1
---port <number>              # default: 1340, then choose a free port
---no-open
---allow-network-access       # required with a non-loopback --host
-```
+Add a second `ChatModelFactory` implementation only after the remote-client path is stable. Prefer a browser inference runtime that exposes an AI SDK `LanguageModel` adapter, with WebGPU acceleration and WebAssembly fallback. Keep model download, caching, and inference behind the same AI SDK model boundary so the transport, validator, executor, and UI do not change.
 
-Require an explicit acknowledgement option when `--host` is not loopback because that exposes the unauthenticated local application to the network. The general production deployment remains a host-integrated backend with authentication; the convenience CLI is a single-user local application, not a production multi-user server.
+The browser-model UI must disclose model size, expected download, storage use, hardware requirements, and likely performance before downloading. Require an explicit user action to download a model, show progress, allow cancellation, and use browser cache/storage where the runtime supports it. Never make a large model part of the normal application bundle.
 
-Build and publish `molstar-chat` separately from the existing `molstar` npm package, while keeping its sources and tests in this repository. The release artifact must include the compiled `src/apps/molstar-chat` assets; it must not compile Mol* or download frontend code at first launch. Keep the package version aligned with the Mol* version it embeds and test the packed tarball before publication.
+Candidate small instruction models must be tested specifically for reliable Protocol V1 JSON generation. Browser inference is an optional privacy/offline mode, not a fallback that is downloaded automatically after a remote-provider error.
 
 ## Command Protocol V1
 
@@ -233,7 +206,7 @@ Initial allowlists should be deliberately small:
 - Built-in selections: the stable concepts in `StructureSelectionQueries`, starting with `all`, `polymer`, `protein`, `nucleic`, `ligand`, `water`, `ion`, `helix`, `beta`, `backbone`, and `sidechain`.
 - URL formats: formats explicitly supported by the Viewer loader, beginning with `mmcif`, `pdb`, `mol`, `sdf`, and `mol2`; verify names against the active `dataFormats` registry before execution.
 
-Example server response:
+Example model response:
 
 ```json
 {
@@ -273,7 +246,7 @@ interface ChatCommandResult {
 
 Execute in array order because later commands commonly depend on earlier loads. Stop dependent commands after a load failure, but preserve prior successful operations and report partial completion accurately.
 
-## Viewer Context Sent To The Backend
+## Viewer Context Sent To The Model
 
 Send only enough state to resolve references and avoid impossible actions:
 
@@ -284,16 +257,17 @@ Send only enough state to resolve references and avoid impossible actions:
 - Current representation/preset summary where cheaply available.
 - Supported command names and current allowlist values.
 
-Cap list sizes and request bytes. Do not serialize coordinates, full state snapshots, asset URLs containing credentials, or arbitrary metadata. Mark Viewer context as untrusted data in the backend system prompt so structure labels cannot become instructions.
+Cap list sizes and request bytes. Do not serialize coordinates, full state snapshots, asset URLs containing credentials, or arbitrary metadata. Mark Viewer context as untrusted data in the system prompt so structure labels cannot become instructions.
 
 V1 can default commands to all currently selected structures, matching existing manager behavior. Add an optional validated `structureRef` to relevant commands once multi-structure ambiguity is tested; the model should ask a clarification question instead of guessing when multiple structures match a user reference.
 
 ## Safety And Reliability Rules
 
-- Never expose model-provider API keys in Viewer options, browser storage, query parameters, or bundled source.
-- Require HTTPS outside local development and apply normal server authentication/CSRF policy at the application backend.
-- Enforce server-side rate limits, message length, history length, response size, timeout, and model token limits.
-- Validate model output again in the browser even if the backend uses structured output.
+- Store the optional provider token only in the versioned chat settings entry in `localStorage`; never put it in URLs, logs, Mol* snapshots, error messages, analytics, or bundled source.
+- Clearly disclose that browser storage is not secret storage and recommend scoped, revocable, low-limit tokens.
+- Require HTTPS endpoints except for loopback development. Send `Authorization` only to the exact normalized origin and path configured by the user, with redirects disabled or rejected so credentials cannot cross origins.
+- Enforce client-side message length, history length, response size, timeout, and model token limits. Provider-side limits remain the user's responsibility.
+- Validate every model response in the browser even when the provider uses structured output.
 - Reject unknown command kinds, properties, presets, themes, formats, and selection keys.
 - Validate PDB IDs and normalize them to uppercase. Use the existing loader for provider URL construction.
 - For `load-url`, allow only `https:` by default. Applications should configure an origin allowlist or require a visible confirmation for an untrusted origin to limit SSRF-like proxying, credential leakage, and unexpectedly large downloads.
@@ -339,43 +313,67 @@ Before each command, check required preconditions such as at least one loaded st
 
 Extract the non-UI quick-style functions from `src/mol-plugin-ui/structure/quick-styles.tsx` into a reusable plugin-state/helper module rather than importing UI code into the executor. Keep the current buttons calling the same extracted functions so chat and buttons cannot drift.
 
-### 3. Add A Vendor-Neutral Client And Controller
+### 3. Add The AI SDK Provider, Transport, And Controller
 
-Create `src/extensions/chat/client.ts` with a small injectable interface and a default HTTP implementation. Suggested endpoint contract:
+Add compatible pinned versions of `ai`, `@ai-sdk/openai`, and `@ai-sdk/react`. Keep these versions aligned because the provider, `ChatTransport`, `UIMessage` parts, and React hook APIs evolve together. Verify their React peer requirements against this repository's React 18 build before implementation.
 
-```http
-POST /api/molstar/chat
-Content-Type: application/json
+Create `src/extensions/chat/client.ts` around `createOpenAI` from `@ai-sdk/openai`. The factory uses the configured base URL and model's Chat Completions implementation explicitly:
 
-{ "version": 1, "messages": [...], "context": {...} }
+```ts
+const provider = createOpenAI({
+    baseURL: settings.endpoint,
+    apiKey: settings.apiToken || OptionalApiKeyPlaceholder,
+    fetch: createGuardedFetch(settings),
+})
+const model = provider.chat(settings.model)
 ```
 
-The response is `ChatResponseV1`. Start with a normal JSON response; add SSE streaming only when needed. Commands should not execute until the complete response validates. If text streaming is later added, stream display text separately from the final structured command envelope.
+The guarded fetch must set `redirect: 'error'`, enforce the configured origin/path, cap response bytes, map browser/network failures, and remove the placeholder `Authorization` header when no token is configured. This preserves genuinely unauthenticated local endpoints even if the pinned `@ai-sdk/openai` version requires a non-empty `apiKey` at provider construction. Test this behavior against the exact pinned SDK version rather than relying on undocumented internals.
 
-Create `src/extensions/chat/controller.ts` to own messages, pending state, `AbortController`, context construction, validation, sequential execution, and an RxJS `BehaviorSubject` consumed by the UI. Keep a bounded in-memory conversation. Do not place chat history in Mol* snapshots by default because it may contain private user text; persistence should be an explicit application option.
+Create `src/extensions/chat/transport.ts` as a custom AI SDK `ChatTransport`. Its `sendMessages` implementation converts bounded `UIMessage` history into model messages, adds the system prompt and Viewer context, and invokes AI SDK Core:
 
-Make the client injectable so embedders can use their own authenticated transport and tests can use fixtures without network access.
+```ts
+const result = await generateText({
+    model,
+    system: buildSystemPrompt(context),
+    messages,
+    output: Output.object({
+        name: 'molstar_chat_response_v1',
+        schema: chatResponseV1Schema,
+    }),
+    abortSignal,
+})
+```
+
+Use an AI SDK-compatible JSON Schema adapter backed by the same V1 schema used by local validation; do not maintain an unrelated hand-written schema. The transport emits the validated `message` as the assistant text part and the command envelope as a typed `data-molstar-command-response` part. Commands execute only after that complete data part passes the local strict validator. Treat provider errors, refusals, missing output, invalid objects, redirects, oversized responses, and timeouts as typed transport errors. Start without partial command streaming.
+
+In `src/extensions/chat/ui.tsx`, use `useChat` from `@ai-sdk/react` with this transport for messages, `sendMessage`, `regenerate`, `stop`, error state, and request status. Keep text input state local because current `useChat` does not own it. Use the hook's data/finish callbacks to hand a validated command envelope to `ChatController` exactly once. Give each completed envelope a stable response ID and have the controller deduplicate it so React rerenders, retries, or repeated callbacks cannot execute commands twice.
+
+Create `src/extensions/chat/controller.ts` to own Viewer context construction, sequential command execution, execution results, and disposal. It no longer duplicates conversation or transport state already owned by `useChat`; its RxJS state is limited to Mol* execution status/results needed outside the hook. Keep a bounded in-memory AI SDK message list and do not place it in Mol* snapshots by default because it may contain private user text.
+
+Keep the model factory and transport injectable so embedders can supply another AI SDK model, tests can use AI SDK mock models without network access, and a browser-inference model can be added later.
 
 ### 4. Add The Reusable Chat Behavior And Dedicated App
 
-Create `src/extensions/chat/behavior.ts` using `PluginBehavior.create`. Its parameters should include only non-secret browser configuration such as:
+Create `src/extensions/chat/behavior.ts` using `PluginBehavior.create`. Its parameters should include application policy rather than user credentials:
 
-- `endpoint` with a same-origin default such as `/api/molstar/chat`.
-- Optional request headers supplied at runtime by the host application, not static API secrets.
+- The versioned `localStorage` key, with a collision-resistant default.
+- Optional initial endpoint and model suggestions for first use; never an embedded token.
+- An optional allowed-endpoint predicate for embedders that want to restrict provider origins.
 - URL-origin policy and maximum context/history sizes.
 - Whether confirmation is required for external structure URLs.
 
-On `register`, create/store the controller and add the React `ChatControls` component from `src/extensions/chat/ui.tsx` to `ctx.customStructureControls` under a unique key. On `unregister`, abort pending work, dispose subjects/subscriptions, delete the control, and remove stored state.
+On `register`, create/store the controller and add the React `ChatControls` component from `src/extensions/chat/ui.tsx` to `ctx.customStructureControls` under a unique key. On `unregister`, unmounting the control must stop the AI SDK transport request; also abort pending command execution, dispose subjects/subscriptions, delete the control, and remove stored state.
 
-Export the reusable browser feature from `src/extensions/chat/index.ts`. `src/extensions/chat` may depend on Mol* plugin and UI APIs, but it must not import from `src/apps/molstar-chat`, `src/servers/chat`, or the CLI.
+Export the reusable browser feature from `src/extensions/chat/index.ts`. `src/extensions/chat` may depend on Mol* plugin and UI APIs, but it must not import from `src/apps/molstar-chat`.
 
-Create `src/apps/molstar-chat` as a separate app following the build conventions of `src/apps/viewer`, with its own `index.ts`, `index.html`, `app.ts`, and `plugin-spec.ts`. Its plugin spec registers `PluginSpec.Behavior(ChatBehavior)` directly and enables the panel with the same-origin `/api/molstar/chat` endpoint. The app may reuse Viewer presets, themes, and setup helpers, but it owns its defaults and must not require chat-specific changes in `src/apps/viewer`.
+Create `src/apps/molstar-chat` as a separate app following the build conventions of `src/apps/viewer`, with its own `index.ts`, `index.html`, `app.ts`, and `plugin-spec.ts`. Its plugin spec registers `PluginSpec.Behavior(ChatBehavior)` directly. On first use, the panel asks the user for endpoint, model, and optional token. The app may reuse Viewer presets, themes, and setup helpers, but it owns its defaults and must not require chat-specific changes in `src/apps/viewer`.
 
-Add `molstar-chat` to the app list in `scripts/build.mjs`, producing `build/molstar-chat`. Do not put provider selection, model selection, base URLs, or API keys in browser options; those remain server startup configuration.
+Add `molstar-chat` to the app list in `scripts/build.mjs`, producing `build/molstar-chat`. Ensure public asset paths are relative or accept a build-time base path so the output works from a GitHub Pages project subpath.
 
 ### 5. Build The Chat UI
 
-Create the React panel in `src/extensions/chat/ui.tsx` as a `CollapsableControls` or `PluginUIComponent` using existing controls and theme variables. Keep it reusable: it receives state through the controller/plugin context and contains no application bootstrap or provider-specific logic. The panel should contain:
+Create the React panel in `src/extensions/chat/ui.tsx` as a `CollapsableControls` or `PluginUIComponent` using existing controls and theme variables. Keep it reusable: chat state comes from `useChat`, Mol* execution state comes from the controller/plugin context, and the component contains no application bootstrap or provider-specific request logic. The panel should contain:
 
 - Scrollable transcript with user, assistant, execution-result, and error messages.
 - Sanitized Markdown for assistant text.
@@ -385,47 +383,40 @@ Create the React panel in `src/extensions/chat/ui.tsx` as a `CollapsableControls
 - Per-command status summaries, including partial failure and zero-match selection.
 - Retry for transport failures without automatically replaying already executed commands.
 - Clear conversation, which does not clear molecular state.
+- Provider settings for endpoint, model, and optional token, with masked token input and explicit Save, Test Connection, and Clear actions.
+- A concise warning that the token is stored in this browser and can be read by scripts running on the same origin.
+- Actionable compatibility errors for CORS, mixed content, authentication, unsupported chat-completions behavior, timeout, and malformed model output.
 - A few first-use examples such as load, select/focus, and style.
 - Accessible labels, keyboard focus, live status announcements, and disabled-state feedback.
 
 Create `src/extensions/chat/style.scss` and import it from `src/apps/molstar-chat/index.ts`. Rely on Mol* CSS variables instead of fixed light-theme colors. Verify right-panel sizing in landscape, portrait, collapsed controls, and embedded mode. Keep the input reachable when the transcript grows.
 
-### 6. Add The Node Backend And OpenAI-Compatible Adapter
+### 6. Add Settings Persistence And Static Deployment
 
-The production host needs a backend route because Mol* cannot safely own a model-provider secret. Add the reference Express server under `src/servers/chat`; keep it independent from the Viewer bundle so production hosts can mount the route in an existing authenticated application instead.
+Create `src/extensions/chat/settings.ts` for strict parsing, normalization, and persistence of the versioned provider settings. Keep storage access behind a small interface so tests can use an in-memory implementation and embedders can replace `localStorage` if needed.
 
-The route should:
+Settings behavior should:
 
-- Authenticate the user according to the host application.
-- Validate the inbound request and discard unsupported context fields.
-- Apply rate, size, timeout, and concurrency limits.
-- Supply a system prompt describing only Protocol V1 and the distinction between author and label residue numbering.
-- Use the provider's structured-output/tool API when available.
-- Validate the provider response against the same logical schema before returning it.
-- Return provider-neutral error codes and never return secrets or raw provider diagnostics.
+- Trim and normalize endpoint and model values before saving.
+- Require an `https:` endpoint except for `localhost`, `127.0.0.1`, and `[::1]` development endpoints.
+- Reject endpoint URLs containing user info, query strings, or fragments.
+- Save the endpoint, model, and optional token only after validation.
+- Keep the token out of observable controller state exposed to transcript components; expose only whether a token is configured.
+- Leave AI SDK telemetry disabled and do not pass provider request/response bodies to logging or analytics.
+- Remove both persisted and in-memory values when the user clears settings.
+- Handle unavailable or quota-exceeded storage without preventing temporary, in-memory use.
 
-The reference implementation should additionally:
+Add a GitHub Actions workflow or extend the existing static-site workflow to build `build/molstar-chat` and publish it to GitHub Pages. The deployment smoke test should load the application from a non-root base path and verify that chunks, CSS, workers, and Mol* assets resolve without a server rewrite.
 
-- Construct the `OpenAICompatibleChatProvider` from resolved startup configuration and fail fast on missing or inconsistent values.
-- Fix the provider, base URL, and model for the process; do not accept any of them from the browser request.
-- Send one non-streaming chat-completions request with the strict `ChatResponseV1` JSON Schema and a low temperature where supported.
-- For OpenRouter, send the bearer API key and require provider routing that supports the structured-output parameters. Optional attribution headers may be configured server-side.
-- For Ollama, use the loopback OpenAI-compatible endpoint and document that Ollama must be running on the same machine as this backend, not merely on the machine running a remote user's browser.
-- Propagate cancellation and enforce a server-side timeout with `AbortSignal`.
-- Map authentication, rate-limit, timeout, malformed-output, and upstream failures to stable application error codes.
-- Expose a readiness check that reports configuration and upstream availability without revealing the model API key or raw diagnostics.
-
-Add a `chat-server` package script for the compiled server and document one OpenRouter and one Ollama launch example. Do not ship a default model identifier: models available through hosted and local providers change independently of Mol*, so deployment must choose and test one that supports the schema.
-
-The prompt should require clarification when identifiers are ambiguous and prohibit claims that an operation succeeded. Success is determined only by the browser executor.
+The system prompt is bundled with the client. It should describe only Protocol V1 and the distinction between author and label residue numbering, mark Viewer context as untrusted, require clarification when identifiers are ambiguous, and prohibit claims that an operation succeeded. Success is determined only by the browser executor.
 
 ### 7. Test And Roll Out
 
 Add pure Jest tests under `src/extensions/chat/_spec` for protocol validation, context truncation, result aggregation, cancellation boundaries, component/controller behavior, and command dependency behavior. Use a small executor adapter interface or injected operation functions so most command routing can be tested without WebGL.
 
-Add server tests under `src/servers/chat/_spec` using mocked `fetch` for configuration validation, OpenRouter and Ollama request mapping, structured response parsing, timeout/cancellation, secret redaction, and stable error mapping. No normal test should require a live model or API key.
+Add provider, transport, hook integration, and settings tests under `src/extensions/chat/_spec` using the guarded mocked `fetch`, AI SDK mock models, and in-memory storage. Cover endpoint normalization, invalid storage, optional authorization, redirect rejection, AI SDK message conversion, typed data parts, exactly-once command execution, `useChat` cancellation/status behavior, structured-output capability fallback, response validation, timeout/cancellation, token redaction, CORS-like failures, clearing settings, and stable error mapping. No normal test should require a live model or API token.
 
-Add CLI tests for zero-argument Ollama discovery, interactive and non-interactive model selection, occupied-port fallback, `--no-open`, loopback binding, clean shutdown, missing secrets, and rejection of unsafe network exposure. Add a package smoke test that installs the packed `molstar-chat` tarball in a temporary directory, launches it against a fake OpenAI-compatible server, loads the `molstar-chat` app, and verifies that `/api/molstar/chat` is same-origin.
+Add a static-app smoke test that serves `build/molstar-chat` beneath a project-style subpath, loads it in a browser, configures a fake CORS-enabled OpenAI-compatible endpoint, and completes one validated command response.
 
 Add focused integration tests with a lightweight `PluginContext` where feasible for:
 
@@ -441,16 +432,18 @@ Add browser/manual scenarios for UI behavior and real network loading:
 1. Load `1TQN`, select chain A residues 25-40, focus, then apply cartoon.
 2. Load two structures and verify an ambiguous request causes clarification instead of silently targeting one.
 3. Apply illustrative style and undo it.
-4. Submit malformed server JSON and verify no state mutation occurs.
+4. Submit malformed provider JSON and verify no state mutation occurs.
 5. Cancel during a slow request and during a multi-command sequence.
 6. Exercise desktop, narrow/portrait, expanded, and embedded layouts.
-7. Verify no credential appears in built assets, network request bodies, URLs, logs, or snapshots.
+7. Verify the token appears only in the `Authorization` header sent to the configured endpoint and in the expected `localStorage` entry, never in built assets, URLs, logs, transcript state, analytics, or snapshots.
+8. Load the production build from a GitHub Pages-style subpath and verify all assets resolve.
+9. Verify a CORS-blocked endpoint produces actionable setup guidance.
 
 Run at minimum:
 
 ```bash
 npm run lint
-npm run jest -- src/extensions/chat src/servers/chat src/cli/molstar-chat
+npm run jest -- src/extensions/chat
 npm run build:lib
 npm run build:apps
 ```
@@ -464,6 +457,8 @@ New files:
 - `src/extensions/chat/context.ts`
 - `src/extensions/chat/executor.ts`
 - `src/extensions/chat/client.ts`
+- `src/extensions/chat/transport.ts`
+- `src/extensions/chat/settings.ts`
 - `src/extensions/chat/controller.ts`
 - `src/extensions/chat/behavior.ts`
 - `src/extensions/chat/ui.tsx`
@@ -471,27 +466,23 @@ New files:
 - `src/extensions/chat/index.ts`
 - `src/extensions/chat/_spec/validation.spec.ts`
 - `src/extensions/chat/_spec/executor.spec.ts`
+- `src/extensions/chat/_spec/client.spec.ts`
+- `src/extensions/chat/_spec/transport.spec.ts`
+- `src/extensions/chat/_spec/settings.spec.ts`
 - `src/extensions/chat/_spec/controller.spec.ts`
 - `src/extensions/chat/_spec/ui.spec.ts`
 - `src/apps/molstar-chat/index.ts`
 - `src/apps/molstar-chat/index.html`
 - `src/apps/molstar-chat/app.ts`
 - `src/apps/molstar-chat/plugin-spec.ts`
-- `src/servers/chat/config.ts`
-- `src/servers/chat/provider.ts`
-- `src/servers/chat/server.ts`
-- `src/servers/chat/_spec/provider.spec.ts`
-- `src/servers/chat/_spec/server.spec.ts`
-- `src/cli/molstar-chat/index.ts`
-- `src/cli/molstar-chat/_spec/index.spec.ts`
-- A packaging manifest and README for the separately published `molstar-chat` npm artifact.
+- A GitHub Pages deployment workflow or job for the static `molstar-chat` application.
 
 Likely modified files:
 
 - `src/mol-plugin-ui/structure/quick-styles.tsx` plus a new non-UI helper so buttons and chat share style operations.
-- `package.json` to add the compiled `chat-server` entry point and script.
+- `package.json` and `package-lock.json` to add compatible pinned `ai`, `@ai-sdk/openai`, and `@ai-sdk/react` dependencies.
 - `scripts/build.mjs` to register the `molstar-chat` application build.
-- Build/release scripts to assemble and smoke-test the npm package with the compiled server and `build/molstar-chat` assets.
+- Build configuration to support a non-root public base path for GitHub Pages.
 
 Avoid changing `PluginUISpec`, the core layout, or `LeftPanelTabName` for the first release. Those changes are unnecessary for a collapsible right-side control and would broaden compatibility risk.
 
@@ -506,12 +497,12 @@ Avoid changing `PluginUISpec`, the core layout, or `LeftPanelTabName` for the fi
 
 ### Milestone 2: End-To-End Chat
 
-- Behavior registration, controller, HTTP client, and responsive chat UI exist.
-- A host-provided backend returns valid Protocol V1 responses.
-- The reference backend runs against either OpenRouter or a local Ollama instance through the same OpenAI-compatible adapter.
-- `pnpx molstar-chat` starts the local server, discovers a usable Ollama model, and opens the built `src/apps/molstar-chat` application without requiring a repository checkout.
+- Behavior registration, AI SDK provider/transport, `useChat` integration, controller, and responsive chat UI exist.
+- Users can configure an OpenAI-compatible endpoint, model, and optional token, and the validated settings persist in `localStorage`.
+- The browser client works with at least one CORS-enabled hosted provider and one CORS-configured local runtime through the same OpenAI-compatible adapter.
+- The static application is deployable on GitHub Pages and works from a project subpath without a chat backend.
 - Cancellation, errors, partial results, and zero matches are visible and accurate.
-- No provider secret enters the browser.
+- Token storage and browser-exposure risks are clearly disclosed, and tokens are never logged or included in URLs, transcript state, or Mol* snapshots.
 
 ### Milestone 3: Hardening And Expansion
 
@@ -519,6 +510,13 @@ Avoid changing `PluginUISpec`, the core layout, or `LeftPanelTabName` for the fi
 - Confirmation policy covers untrusted URLs and any newly introduced destructive action.
 - Telemetry records latency/error/command-kind aggregates only with host consent and without message content by default.
 - Add new molecular commands one at a time with protocol, validation, executor, and tests updated together.
+
+### Stretch Milestone: In-Browser Model
+
+- A small tested instruction model can produce valid Protocol V1 responses through the same AI SDK `LanguageModel`/`ChatModelFactory` boundary.
+- Model download is opt-in, cancellable, and reports size, progress, storage use, and hardware compatibility.
+- After model assets are cached, chat can operate without a model endpoint or API token.
+- Failure or unsupported hardware falls back to provider configuration without automatically downloading another model.
 
 ## Acceptance Criteria
 
@@ -530,6 +528,9 @@ Avoid changing `PluginUISpec`, the core layout, or `LeftPanelTabName` for the fi
 - Selection behavior clearly documents its separate undo/history semantics.
 - The feature is optional and cleanly registered/unregistered through the plugin behavior lifecycle.
 - The UI works in desktop and narrow layouts and uses existing Mol* visual conventions.
-- Provider credentials remain server-side, model output is rendered without raw HTML, and external URLs are policy-checked.
-- The published `molstar-chat` package supports `pnpx molstar-chat`, `pnpm dlx molstar-chat`, and `npx molstar-chat`; it serves bundled assets and opens the browser from a loopback-only server by default.
+- Endpoint, model, and optional token can be configured and cleared in the browser; settings survive reloads through `localStorage`.
+- Provider calls use `@ai-sdk/openai` with the Chat Completions model factory, and chat lifecycle/state use `useChat` from `@ai-sdk/react` without requiring an application backend.
+- The UI warns that the token is browser-accessible, sends it only to the configured endpoint, and model output is rendered without raw HTML.
+- CORS, HTTPS/mixed-content, authentication, timeout, and malformed-response failures are distinguishable and actionable.
+- The built `molstar-chat` application runs as static files on GitHub Pages from a non-root project path.
 - Lint, targeted Jest tests, library build, and the `molstar-chat` app build pass.
