@@ -10,6 +10,7 @@
 import { ANVILMembraneOrientation } from '../../extensions/anvil/behavior';
 import { AssemblySymmetry } from '../../extensions/assembly-symmetry';
 import { Backgrounds } from '../../extensions/backgrounds';
+import { ChatExtension } from '../../extensions/chat';
 import { DebugHelpers } from '../../extensions/debug-helpers';
 import { DnatcoNtCs } from '../../extensions/dnatco';
 import { G3DFormat } from '../../extensions/g3d/format';
@@ -39,6 +40,7 @@ export const ExtensionMap = {
     // Mol* built-in extensions
     'mvs': PluginSpec.Behavior(MolViewSpec),
     'backgrounds': PluginSpec.Behavior(Backgrounds),
+    'chat': PluginSpec.Behavior(ChatExtension),
     'debug-helpers': PluginSpec.Behavior(DebugHelpers),
     'model-export': PluginSpec.Behavior(ModelExport),
     'mp4-export': PluginSpec.Behavior(Mp4Export),
