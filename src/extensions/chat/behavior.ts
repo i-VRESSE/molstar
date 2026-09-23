@@ -3,6 +3,7 @@
  */
 
 import { PluginBehavior } from '../../mol-plugin/behavior/behavior';
+import { ChatController, deleteChatController, setChatController } from './controller';
 import { ChatControls } from './ui';
 
 const ChatControlsKey = 'molstar-chat';
@@ -14,7 +15,11 @@ export const ChatExtension = PluginBehavior.create<{}>({
         name: 'Chat'
     },
     ctor: class extends PluginBehavior.Handler<{}> {
+        private controller: ChatController | undefined;
+
         register(): void {
+            this.controller = new ChatController();
+            setChatController(this.ctx, this.controller);
             this.ctx.customImportControls.set(ChatControlsKey, ChatControls as any);
         }
 
@@ -24,6 +29,9 @@ export const ChatExtension = PluginBehavior.create<{}>({
 
         unregister(): void {
             this.ctx.customImportControls.delete(ChatControlsKey);
+            deleteChatController(this.ctx);
+            this.controller?.dispose();
+            this.controller = void 0;
         }
     },
     params: () => ({})

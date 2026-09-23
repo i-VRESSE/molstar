@@ -171,6 +171,33 @@ async function createBundle(app) {
 
     await ctx.rebuild();
 
+    if (kind === 'app' && name === 'viewer') {
+        await createChatWorkerBundle();
+    }
+
+    if (!isProduction) await ctx.watch();
+}
+
+async function createChatWorkerBundle() {
+    const ctx = await esbuild.context({
+        entryPoints: ['./src/extensions/chat/worker.ts'],
+        tsconfig: './tsconfig.json',
+        bundle: true,
+        format: 'esm',
+        minify: isProduction,
+        minifyIdentifiers: false,
+        sourcemap: includeSourceMap,
+        outfile: './build/viewer/molstar-chat-worker.js',
+        external: ['crypto', 'fs', 'path', 'stream'],
+        color: true,
+        logLevel: 'info',
+        define: {
+            'process.env.NODE_ENV': JSON.stringify(NODE_ENV_PRD ? 'production' : 'development'),
+            'process.env.DEBUG': JSON.stringify(process.env.DEBUG || false),
+        },
+    });
+
+    await ctx.rebuild();
     if (!isProduction) await ctx.watch();
 }
 

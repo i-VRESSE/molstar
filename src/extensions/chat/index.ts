@@ -3,4 +3,8 @@
  */
 
 export { ChatExtension } from './behavior';
+export { ChatController } from './controller';
+export { SupportedChatModels } from './model';
+export { ChatSettings } from './settings';
+export { MolstarChatTransport } from './transport';
 export { ChatControls } from './ui';

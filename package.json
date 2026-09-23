@@ -71,16 +71,23 @@
   "jest": {
     "moduleFileExtensions": [
       "ts",
+      "tsx",
       "js"
     ],
     "transform": {
-      "\\.ts$": [
+      "\\.tsx?$": [
         "esbuild-jest-transform",
         {
           "tsconfigRaw": "{\"compilerOptions\":{\"useDefineForClassFields\":false}}"
         }
+      ],
+      "\\.js$": [
+        "esbuild-jest-transform"
       ]
     },
+    "transformIgnorePatterns": [
+      "node_modules/(?!ai/|@ai-sdk/|@workflow/)"
+    ],
     "moduleDirectories": [
       "node_modules",
       "lib"
@@ -170,12 +177,15 @@
     "typescript": "^6.0.3"
   },
   "dependencies": {
+    "@ai-sdk/react": "4.0.115",
+    "@browser-ai/web-llm": "3.0.3",
     "@types/argparse": "^2.0.17",
     "@types/benchmark": "^2.1.5",
     "@types/compression": "1.8.1",
     "@types/express": "^5.0.6",
     "@types/node": "^22.20.1",
     "@types/swagger-ui-dist": "3.30.6",
+    "ai": "7.0.112",
     "argparse": "^2.0.1",
     "compression": "^1.8.1",
     "cors": "^2.8.6",

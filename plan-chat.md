@@ -91,7 +91,7 @@ useChat (@ai-sdk/react: messages, tool parts, cancellation, request status)
     v
 MolstarChatTransport
     v
-AI SDK Core streamText (bounded multi-step tool loop)
+AI SDK Core ToolLoopAgent (agent.stream; bounded multi-step tool loop)
     |
     +--> @browser-ai/web-llm --> Web Worker/WebGPU
     |
@@ -115,26 +115,29 @@ There is no model-produced command envelope and no `ChatCommandExecutor`. The AI
 Responsibilities remain separated:
 
 - The model UI owns capability detection, supported-model selection, explicit download consent, progress, readiness, and lightweight preference persistence.
-- `MolstarChatTransport` converts bounded UI message history to model messages and runs `streamText` locally with the system instructions, registered tools, an abort signal, and a hard step limit.
+- `MolstarChatTransport` converts bounded UI message history to model messages and runs a local `ToolLoopAgent` with system instructions, registered tools, an abort signal, a timeout, and a hard step limit.
 - `createMolstarTools` defines the V1 tool names, descriptions, input schemas, and `execute` functions. Tool schemas are the wire protocol and are shared with UI-message validation and tests.
 - Each `execute` function normalizes its already schema-validated input, applies semantic and deployment-policy checks, calls a public/high-level Mol* API, and returns a bounded structured result based on observed state.
 - A small mutation gate prevents overlapping chat submissions and serializes mutating tool calls. Read-only tools use the same gate as a barrier when they must observe all preceding mutations.
 - `@ai-sdk/react` owns chat messages, tool-call/tool-result parts, submission, approval responses, cancellation, retries, and request status. The UI does not infer success from assistant prose.
 
-Use the Vercel AI SDK with `@browser-ai/web-llm` as the primary language-model provider, `@ai-sdk/react` for chat state, and the core `ai` package for `tool`, `jsonSchema`, `streamText`, model/UI message conversion, loop control, and transport primitives. Target the documented AI SDK v6 pairing (`ai@6` with `@browser-ai/web-llm@2`) and pin exact compatible releases, including `@ai-sdk/react`; do not combine provider and SDK majors. The selected WebLLM model must be tested for tool calling, not merely text or JSON generation.
+Use the Vercel AI SDK with `@browser-ai/web-llm` as the primary language-model provider, `@ai-sdk/react` for chat state, and the core `ai` package for `ToolLoopAgent`, `tool`, `jsonSchema`, model/UI message conversion, loop control, and transport primitives. The implemented compatible releases are pinned exactly to `ai@7.0.112`, `@ai-sdk/react@4.0.115`, and `@browser-ai/web-llm@3.0.3`; React 18 remains supported. The selected WebLLM model must be tested for tool calling, not merely text or JSON generation.
 
 The transport should use a bounded AI SDK tool loop rather than a custom loop. In the pinned SDK version, configure the equivalent of:
 
 ```ts
 const tools = createMolstarTools({ plugin, policy, mutationGate })
 
-const result = streamText({
+const agent = new ToolLoopAgent({
     model,
-    system: buildSystemPrompt(),
-    messages: await convertToModelMessages(messages),
+    instructions: buildSystemPrompt(),
     tools,
     toolChoice: 'auto',
     stopWhen: stepCountIs(MAX_TOOL_STEPS),
+})
+
+const result = await agent.stream({
+    messages: await convertToModelMessages(messages),
     abortSignal,
 })
 ```
@@ -147,15 +150,16 @@ Implement the model factory in `src/extensions/chat/model.ts` with `webLLM` from
 
 ```ts
 interface ChatModelFactory {
-    create(modelId: SupportedChatModel): LanguageModel
+    supportsWebLLM(): boolean
+    create(modelId: SupportedChatModel): ChatModelHandle
 }
 ```
 
-Select a small allowlisted instruction model only after testing it for Protocol V1 accuracy and memory use. Do not expose arbitrary model URLs or IDs. Before model creation, call `doesBrowserSupportWebLLM()`. After creation, use `availability()` to distinguish `unavailable`, `downloadable`, and `available` states. If downloading is required, show the model's expected download and memory requirements, require explicit user confirmation, and call `createSessionWithProgress` to report progress. Never begin a large download merely because the user expanded the panel or because another provider failed.
+The implemented allowlist contains `Qwen3-0.6B-q4f16_1-MLC` and `Ministral-3-3B-Instruct-2512-BF16-q4f16_1-MLC`. Validate both against WebLLM's `prebuiltAppConfig`, use that configuration when constructing the provider, and show each record's `vram_required_MB` in its selector label. Do not expose arbitrary model URLs or IDs or maintain separate download, storage, or memory-requirement display fields. Before model creation, call `doesBrowserSupportWebLLM()`. After creation, use `availability()` to distinguish `unavailable`, `downloadable`, and `available` states. Model initialization requires an explicit user action and `createSessionWithProgress` reports progress. Never begin a large download merely because the user expanded the panel or because another provider failed.
 
-Run WebLLM in a module Web Worker created with `new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' })` so model initialization and inference do not block Mol* rendering. `src/extensions/chat/worker.ts` hosts `WebWorkerMLCEngineHandler`. Confirm that the existing Viewer build emits and resolves the worker chunk correctly.
+Run WebLLM in a module Web Worker so model initialization and inference do not block Mol* rendering. `src/extensions/chat/worker.ts` hosts `WebWorkerMLCEngineHandler`; `scripts/build.mjs` emits it as `build/viewer/molstar-chat-worker.js`, and the model factory resolves it with `new URL('./molstar-chat-worker.js', document.baseURI)`. Verify the emitted file manually after the Viewer build.
 
-The custom AI SDK chat transport exposes the V1 Mol* tools to `streamText` and merges the resulting text, tool calls, tool results, and model-download progress into an AI SDK UI message stream. Tool inputs are validated by their AI SDK `inputSchema` before `execute`; the tool then performs semantic checks that JSON Schema cannot express, such as current-state preconditions, URL-origin policy, residue-range limits, and registered format availability. Do not use `Output.object` for molecular actions and do not parse tool calls out of assistant text.
+The custom AI SDK chat transport gives the V1 Mol* tools to `ToolLoopAgent` and merges the resulting text, tool calls, tool results, and model-download progress into an AI SDK UI message stream. Tool inputs are validated by their AI SDK `inputSchema` before `execute`; the tool then performs semantic checks that JSON Schema cannot express, such as current-state preconditions, URL-origin policy, residue-range limits, and registered format availability. Do not use `Output.object` for molecular actions and do not parse tool calls out of assistant text.
 
 V1 allows a bounded multi-step loop only for the current request—for example, `state_tree`, then `download_structure`, then `select_structure`. It does not allow background autonomy, open-ended planning, or execution after the request finishes. A tool may execute only after its complete input validates; partial streamed tool input is display-only. Automatic provider fallback remains out of scope.
 
@@ -324,24 +328,33 @@ The dummy `ChatControls` should:
 
 Do not install `ai`, `@ai-sdk/react`, or `@browser-ai/web-llm` in this step. Do not add model settings, model downloads, workers, `localStorage`, network calls, tool definitions, or mutations of Viewer state. The purpose is to validate placement, collapse behavior, scrolling, responsive layout, extension enable/disable behavior, and the existing Viewer build before introducing the functional layers.
 
-### 1. Add Toolless In-Browser Chat
+### 1. Add Toolless In-Browser Chat — Implemented
 
-Turn the dummy panel into a real text-only chat before exposing any Mol* capability. Add compatible pinned versions of `ai`, `@ai-sdk/react`, and `@browser-ai/web-llm`; target the documented AI SDK v6 pairing described above and verify React peer requirements against this repository's React 18 build.
+Turn the dummy panel into a real text-only chat before exposing any Mol* capability. Use the implemented exact versions `ai@7.0.112`, `@ai-sdk/react@4.0.115`, and `@browser-ai/web-llm@3.0.3`; the React adapter supports this repository's React 18 build.
 
-Create `src/extensions/chat/model.ts` to own the supported model allowlist, WebGPU capability checks, model construction, availability, download progress, and lifecycle. Create `src/extensions/chat/worker.ts` with `WebWorkerMLCEngineHandler`, and construct the selected model through `webLLM(modelId, { worker })`. Model initialization and download must remain explicit user actions.
+Create `src/extensions/chat/model.ts` to own a single ordered model-info allowlist containing `Qwen3-0.6B-q4f16_1-MLC` and `Ministral-3-3B-Instruct-2512-BF16-q4f16_1-MLC`; derive the supported IDs and default order from its keys. It also owns `prebuiltAppConfig` lookup, VRAM-labelled selector options, WebGPU capability checks, model construction, availability, download progress, and lifecycle. Create `src/extensions/chat/worker.ts` with `WebWorkerMLCEngineHandler`, construct the selected model through `webLLM(modelId, { worker, appConfig })`, and emit the worker as `build/viewer/molstar-chat-worker.js`. Model initialization and download must remain explicit user actions.
 
-Create a first `src/extensions/chat/transport.ts` as a custom AI SDK `ChatTransport`. It converts bounded `UIMessage` history to model messages and calls `streamText` with the local model, an abort signal, and a tool-free system prompt:
+Create a first `src/extensions/chat/transport.ts` as a custom AI SDK `ChatTransport`. It converts bounded `UIMessage` history to model messages and calls `ToolLoopAgent.stream` with the local model, an abort signal, a timeout, and a tool-free system prompt:
 
 ```ts
-const result = streamText({
+const agent = new ToolLoopAgent({
     model,
-    system: buildToollessSystemPrompt(),
+    instructions: buildToollessSystemPrompt(),
+    maxOutputTokens: MaxChatOutputTokens,
+    maxRetries: 0,
+    experimental_telemetry: { isEnabled: false },
+})
+
+const result = await agent.stream({
     messages: await convertToModelMessages(messages),
     abortSignal,
+    timeout: { totalMs: ChatGenerationTimeoutMs },
 })
 ```
 
 Do not pass `tools`, Viewer context, molecular state, or operation instructions in this milestone. The system prompt must state that this is a conversational preview and that it cannot inspect or modify the Viewer. Assistant text must not imply that molecular actions were performed.
+
+The implemented bounds are 24 messages, 2,000 characters per message, 16,000 history characters, 512 output tokens, a 120-second timeout, zero retries, and disabled AI SDK telemetry.
 
 Use `useChat` for the transcript, submission, streaming status, cancellation, and errors. Add the supported-model selector, explicit Download/Initialize action, progress, basic compatibility/error states, clear conversation, and the local-inference privacy note. Create the initial controller for model setup, transport lifecycle, and disposal, and persist only the allowlisted model preference through the storage abstraction.
 
@@ -368,7 +381,7 @@ Every operation checks current-state preconditions, cancellation, and policy imm
 
 ### 3. Add The AI SDK Tool Catalog
 
-Using the core `ai` dependency introduced by the tool-free chat milestone, create `src/extensions/chat/tools.ts`. Define every V1 operation with `tool({ description, inputSchema, execute })`; use AI SDK `jsonSchema` and the shared protocol types. Create `src/extensions/chat/mutation-gate.ts` for serialization, cancellation barriers, per-turn limits, and exactly-once `toolCallId` handling.
+A developer-only `src/extensions/chat/tools.ts` prototype containing version and PDB-loading tools already exists, but Milestone 1 does not import or register it. In Milestone 2, replace or expand that prototype into the complete V1 catalog with `tool({ description, inputSchema, execute })`, AI SDK `jsonSchema`, and the shared protocol types. Create `src/extensions/chat/mutation-gate.ts` for serialization, cancellation barriers, per-turn limits, and exactly-once `toolCallId` handling.
 
 Schema and tool tests should cover:
 
@@ -383,18 +396,22 @@ Schema and tool tests should cover:
 Evolve the tool-free `ChatTransport`. Its `sendMessages` implementation still converts bounded `UIMessage` history into model messages, but now adds the V1 system instructions and tiny initial state summary, creates the V1 tool map, and invokes AI SDK Core with a bounded tool loop:
 
 ```ts
-const result = streamText({
+const agent = new ToolLoopAgent({
     model,
-    system: buildSystemPrompt(),
-    messages,
+    instructions: buildSystemPrompt(),
     tools: createMolstarTools(toolContext),
     toolChoice: 'auto',
     stopWhen: stepCountIs(MAX_TOOL_STEPS),
+})
+
+const result = await agent.stream({
+    messages,
     abortSignal,
+    timeout: { totalMs: ChatGenerationTimeoutMs },
 })
 ```
 
-Use the exact API names from the pinned AI SDK version; the example above follows the AI SDK v6 shape documented by `@browser-ai/web-llm` v2. Do not mix it with v7 names or packages without updating the transport and tests together. The transport can emit typed model-download progress data parts, then merges the `streamText` UI-message stream so tool input, approval, output, error, and final-text parts retain their AI SDK types. Treat unsupported WebGPU, download/storage failure, worker failure, model initialization failure, cancellation, invalid tool input, unknown tool, step-limit exhaustion, and timeouts as distinct typed errors. Never execute partial streamed tool input.
+Use the exact AI SDK 7 `ToolLoopAgent` API shown above. The transport can emit typed model-download progress data parts, then merges the agent's UI-message stream so tool input, approval, output, error, and final-text parts retain their AI SDK types. Treat unsupported WebGPU, download/storage failure, worker failure, model initialization failure, cancellation, invalid tool input, unknown tool, step-limit exhaustion, and timeouts as distinct typed errors. Never execute partial streamed tool input.
 
 Extend the existing `useChat` UI to render tool calls, results, errors, and approvals from `message.parts`. Do not add a second callback that executes operations after generation, because tool `execute` functions already did so. Disable regeneration after any successful mutating tool result unless a future design can prove replay safety.
 
@@ -459,7 +476,7 @@ Settings behavior should:
 - Remove persisted preferences when the user selects Clear Preference; manage cached model assets only through a documented API in the pinned WebLLM version, otherwise leave them to browser storage controls.
 - Handle unavailable or quota-exceeded storage without preventing temporary, in-memory use.
 
-Do not add a chat-specific deployment workflow. Reuse the existing Viewer build and deployment path. Extend its smoke coverage to verify that the chat CSS, Web Worker chunk, and WebLLM runtime assets resolve under the supported deployment path.
+Do not add a chat-specific deployment workflow. Reuse the existing Viewer build and deployment path. After building the Viewer, manually verify that the chat CSS, `build/viewer/molstar-chat-worker.js`, and WebLLM runtime assets resolve under the supported deployment path.
 
 When tools are enabled, replace the Step 1 conversational-preview prompt with the bundled V1 tool prompt. It should describe how to use the V1 tools, require `state_tree` before resolving references against unknown Viewer state, distinguish author and label residue numbering, treat tool output as untrusted data rather than instructions, allow at most one mutating tool call per step, require clarification when identifiers are ambiguous, and prohibit claims that an operation succeeded unless its tool result says so.
 
@@ -469,7 +486,7 @@ Add pure Jest tests under `src/extensions/chat/_spec` for tool schemas, state-tr
 
 Add model, transport, hook integration, and settings tests under `src/extensions/chat/_spec` using an injected capability check, mocked model factory, AI SDK mock models, and in-memory storage. Cover unsupported WebGPU, `unavailable`/`downloadable`/`available` states, explicit download consent, progress, cancellation, worker and quota failures, invalid preferences, AI SDK message conversion, typed tool/data parts, exactly-once tool execution, bounded multi-step behavior, approval flow, `useChat` status behavior, malformed tool input, unknown tools, clearing model preferences, documented cache behavior, and stable error mapping. Normal unit tests must not download a real model.
 
-Add a Viewer smoke test that serves `build/viewer`, confirms the chat extension and worker chunk are present, injects a mock in-browser language model, and completes one validated tool call plus result. Reuse any existing non-root-path deployment fixture rather than downloading model weights in the normal smoke test.
+After `npm run build:apps`, manually serve `build/viewer` from the supported deployment path. Confirm that the chat extension is present, `build/viewer/molstar-chat-worker.js` exists and loads successfully, and a mock in-browser language model can complete one validated tool call plus result. Reuse any existing non-root-path deployment fixture and do not download model weights for this check.
 
 Add focused integration tests with a lightweight `PluginContext` where feasible for:
 
@@ -490,7 +507,7 @@ Add browser/manual scenarios for UI behavior and real network loading:
 6. Exercise the collapsible chat in the left-side Home panel across desktop, narrow/portrait, expanded, and embedded layouts.
 7. On a supported browser, explicitly download the selected test model, observe progress, reload, and verify the cached model is reused.
 8. Verify prompts and Viewer context never leave the browser during inference and never appear in `localStorage`, logs, analytics, or snapshots.
-9. Load the production Viewer build from its supported deployment path and verify the chat panel, worker, runtime, and existing assets resolve.
+9. Load the production Viewer build from its supported deployment path and manually verify the chat panel and existing assets resolve, including a successful request for `molstar-chat-worker.js` with no unresolved TypeScript imports.
 10. Verify unsupported WebGPU, insufficient memory, interrupted download, quota exhaustion, and worker startup failures produce actionable guidance.
 
 Run at minimum:
@@ -504,14 +521,14 @@ npm run build:apps
 
 ## Suggested File Changes
 
-Milestone 0 uses only the initial `behavior.ts`, `ui.tsx`, `style.scss`, and `index.ts` files plus the two Viewer registration/style imports. Milestone 1 adds the model, worker, tool-free transport/controller, initial settings, functional chat UI, and AI SDK dependencies. The protocol, operations, state-tree, tool registry, and mutation gate arrive only in Milestone 2.
+Milestone 0 uses only the initial `behavior.ts`, `ui.tsx`, `style.scss`, and `index.ts` files plus the two Viewer registration/style imports. Milestone 1 adds the model, worker, tool-free transport/controller, initial settings, functional chat UI, AI SDK dependencies, tests, and manual checklist. A dormant developer `tools.ts` prototype is present but is not part of the active transport; the protocol, operations, state-tree, complete tool registry, and mutation gate arrive only in Milestone 2.
 
 New files:
 
 - `src/extensions/chat/protocol.ts`
 - `src/extensions/chat/operations.ts`
 - `src/extensions/chat/state-tree.ts`
-- `src/extensions/chat/tools.ts`
+- `src/extensions/chat/tools.ts` (developer prototype only until Milestone 2)
 - `src/extensions/chat/mutation-gate.ts`
 - `src/extensions/chat/model.ts`
 - `src/extensions/chat/worker.ts`
@@ -522,6 +539,7 @@ New files:
 - `src/extensions/chat/ui.tsx`
 - `src/extensions/chat/style.scss`
 - `src/extensions/chat/index.ts`
+- `src/extensions/chat/manual-test.md`
 - `src/extensions/chat/_spec/operations.spec.ts`
 - `src/extensions/chat/_spec/tools.spec.ts`
 - `src/extensions/chat/_spec/mutation-gate.spec.ts`
@@ -536,7 +554,9 @@ Likely modified files:
 - `src/apps/viewer/extensions.ts` to register `'chat': PluginSpec.Behavior(ChatExtension)`.
 - `src/apps/viewer/index.ts` to include the chat stylesheet in the existing Viewer bundle.
 - `src/mol-plugin-ui/structure/quick-styles.tsx` plus a new non-UI helper so buttons and chat share style operations.
-- `package.json` and `package-lock.json` to add compatible pinned `ai`, `@ai-sdk/react`, and `@browser-ai/web-llm` dependencies.
+- `scripts/build.mjs` to emit `build/viewer/molstar-chat-worker.js`.
+- `package.json` and `package-lock.json` to pin `ai@7.0.112`, `@ai-sdk/react@4.0.115`, and `@browser-ai/web-llm@3.0.3`, and to let Jest transform TSX and the SDK's ESM dependencies.
+- `tsconfig.json` to include the `ES2022.Intl` declarations required by the installed SDK types.
 
 Avoid changing `PluginUISpec`, the core layout, or `LeftPanelTabName` for the first release. Those changes are unnecessary because `customImportControls` already provides the required location in the Home panel.
 
@@ -552,15 +572,16 @@ Avoid changing `PluginUISpec`, the core layout, or `LeftPanelTabName` for the fi
 - No Vercel AI SDK packages, model configuration, persistence, model downloads, workers, tool protocol, or molecular actions are included yet.
 - Lint and the existing Viewer build pass.
 
-### Milestone 1: Toolless In-Browser Chat
+### Milestone 1: Toolless In-Browser Chat — Completed
 
-- The dummy transcript becomes a working text-only chat backed by an allowlisted `@browser-ai/web-llm` model, the custom client-side transport, and `useChat`.
+- The dummy transcript is a working text-only chat backed by the allowlisted Qwen3 and Ministral models, whose selector labels include `vram_required_MB`, plus `ToolLoopAgent`, the custom client-side transport, and `useChat`, using the exact pinned SDK versions listed above.
 - The UI checks WebGPU support and requires an explicit Download/Initialize action with progress before local inference begins.
-- Inference runs in the Web Worker, supports streaming and cancellation, and reuses cached model assets after reload.
+- Inference runs in the explicitly bundled `molstar-chat-worker.js`, supports streaming and cancellation, and reuses cached model assets after reload.
 - The transcript supports user/assistant text, request status, clear conversation, and actionable model/download/worker errors.
 - The selected model preference may persist, but conversation content does not.
-- No AI SDK tools are registered, no Viewer context or molecular state is sent to the model, and chat cannot inspect or mutate Mol* state.
-- Mock-model tests and a Viewer smoke test cover the tool-free transport and UI without downloading real model weights.
+- No AI SDK tools are registered with `ToolLoopAgent`, no Viewer context or molecular state is sent to the model, and chat cannot inspect or mutate Mol* state. The dormant `tools.ts` prototype is reserved for Milestone 2.
+- Five mock-model/controller/settings/UI test suites with 13 tests cover the tool-free implementation without downloading real model weights.
+- Lint, TypeScript, library build, and app builds pass; after the Viewer build, manually verify that `build/viewer/molstar-chat-worker.js` exists and loads from the supported deployment path.
 
 ### Milestone 2: Deterministic Local Tool Prototype
 

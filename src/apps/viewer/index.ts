@@ -10,6 +10,7 @@ import './embedded.html';
 import './favicon.ico';
 import './index.html';
 import '../../mol-plugin-ui/skin/light.scss';
+import '../../extensions/chat/style.scss';
 export * from './lib';
 export * from './extensions';
 export * from './app';
