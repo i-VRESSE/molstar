@@ -18,7 +18,7 @@ The first version is a reusable Viewer extension under `src/extensions/chat`. It
 
 In scope for the first version:
 
-- Load a PDB entry or a supported structure URL.
+- Load an allowlisted PDB, AlphaFold DB, or ModelArchive entry, or a supported structure URL.
 - Select, add, remove, or intersect common molecular targets.
 - Focus or highlight a target.
 - Clear selection/highlights and reset the camera.
@@ -29,7 +29,7 @@ In scope for the first version:
 - Check WebGPU support before offering model setup, require an explicit model download, show progress, and reuse the browser's cached model assets.
 - Persist only lightweight local preferences such as the selected supported model ID; do not place model weights or conversation content in Mol* snapshots.
 
-Deferred until the command boundary is stable:
+Deferred until the tool boundary is stable:
 
 - Measurements, superposition, density maps, animations, and structure editing.
 - Arbitrary MolScript supplied by a model.
@@ -58,7 +58,7 @@ The least invasive first implementation is a `PluginBehavior` exported as `ChatE
 - `loadPdb(plugin, id, options)` in `src/extensions/plugin/loaders.ts` is the preferred high-level entry point. It respects `PluginConfig.Download.DefaultPdbProvider` and delegates to the existing `DownloadStructure` action.
 - `loadStructureFromUrl(plugin, url, format, isBinary, options)` in the same file handles an explicit URL and supported trajectory format.
 - `DownloadStructure` in `src/mol-plugin-state/actions/structure.ts` performs download, parsing, hierarchy creation, and representation preset application within the normal state/task machinery.
-- The loader currently appends structures. A destructive "replace current structure" operation should be a separate explicit command requiring confirmation rather than an implicit property of load.
+- The loader currently appends structures. A destructive "replace current structure" operation should be a separate explicit tool requiring confirmation rather than an implicit property of load.
 
 ### Selections And Camera Interaction
 
@@ -66,8 +66,8 @@ The least invasive first implementation is a `PluginBehavior` exported as `ChatE
 - `StructureElement.Schema` in `src/mol-model/structure/structure/element/schema.ts` is a suitable safe wire-level selection vocabulary. It supports chain IDs, residue IDs/ranges, residue names, atom names, element symbols, entity IDs, insertion codes, and model instance/operator identifiers.
 - `StructureSelectionQueries` in `src/mol-plugin-state/helpers/structure-selection-query.ts` provides curated semantic selections including polymer, protein, nucleic acid, ligand, water, ion, lipid, helix, beta strand, backbone, sidechain, and surroundings.
 - `StructureSelectionManager` in `src/mol-plugin-state/manager/structure/selection.ts` provides `fromLoci`, `fromCompiledQuery`, `fromSelectionQuery`, modifiers, selection statistics, and snapshots.
-- `compileIdListSelection` in `src/mol-script/util/id-list.ts` can support familiar author/label residue-list syntax if that syntax is exposed directly in a later command version.
-- Selection changes are managed separately from the data-state undo stack. The chat response must not claim that data-state Undo will reverse a selection unless selection snapshot/restore is implemented for that command.
+- `compileIdListSelection` in `src/mol-script/util/id-list.ts` can support familiar author/label residue-list syntax if that syntax is exposed directly in a later tool version.
+- Selection changes are managed separately from the data-state undo stack. Tool results and assistant text must not claim that data-state Undo will reverse a selection unless selection snapshot/restore is implemented for that tool.
 
 Use schema-based selection for explicit chain/residue/atom requests and the built-in query registry for named concepts. Do not accept serialized MolScript expressions from the model in v1.
 
@@ -77,8 +77,8 @@ Use schema-based selection for explicit chain/residue/atom requests and the buil
 - `PresetStructureRepresentations` in `src/mol-plugin-state/builder/structure/representation-preset.ts` includes automatic, polymer-and-ligand, polymer-cartoon, atomic-detail, illustrative, molecular-surface, and other presets.
 - `StructureComponentManager.addRepresentation`, `updateRepresentations`, `updateRepresentationsTheme`, and `applyTheme` cover lower-level representation and theme changes.
 - `src/mol-plugin-ui/structure/quick-styles.tsx` is the canonical implementation for the current Default, Cartoon, Spacefill, Surface, and Illustrative buttons. Extract or mirror its non-UI operations instead of simulating button clicks.
-- Registered representation and color-theme names are available from plugin registries. Initial chat commands should still use allowlists so model output remains stable across Mol* versions.
-- State-changing representation operations already use `canUndo` labels such as `Preset`, `Update Representation`, and `Update Theme`. Group a multi-command visual change into one transaction where practical and give it a clear `Chat: ...` undo label.
+- Registered representation and color-theme names are available from plugin registries. Initial chat tools should still use allowlists so the model-facing schemas remain stable across Mol* versions.
+- State-changing representation operations already use `canUndo` labels such as `Preset`, `Update Representation`, and `Update Theme`. Each mutating tool should use the existing transaction behavior and a clear `Chat: ...` undo label where practical.
 
 ## Recommended Architecture
 
@@ -121,7 +121,7 @@ Responsibilities remain separated:
 - A small mutation gate prevents overlapping chat submissions and serializes mutating tool calls. Read-only tools use the same gate as a barrier when they must observe all preceding mutations.
 - `@ai-sdk/react` owns chat messages, tool-call/tool-result parts, submission, approval responses, cancellation, retries, and request status. The UI does not infer success from assistant prose.
 
-Use the Vercel AI SDK with `@browser-ai/web-llm` as the primary language-model provider, `@ai-sdk/react` for chat state, and the core `ai` package for `tool`, `jsonSchema`, `streamText`, model/UI message conversion, loop control, and transport primitives. Pin mutually compatible major versions; `@browser-ai/web-llm` major versions track Vercel AI SDK major versions. The selected WebLLM model must be tested for tool calling, not merely text or JSON generation.
+Use the Vercel AI SDK with `@browser-ai/web-llm` as the primary language-model provider, `@ai-sdk/react` for chat state, and the core `ai` package for `tool`, `jsonSchema`, `streamText`, model/UI message conversion, loop control, and transport primitives. Target the documented AI SDK v6 pairing (`ai@6` with `@browser-ai/web-llm@2`) and pin exact compatible releases, including `@ai-sdk/react`; do not combine provider and SDK majors. The selected WebLLM model must be tested for tool calling, not merely text or JSON generation.
 
 The transport should use a bounded AI SDK tool loop rather than a custom loop. In the pinned SDK version, configure the equivalent of:
 
@@ -130,11 +130,11 @@ const tools = createMolstarTools({ plugin, policy, mutationGate })
 
 const result = streamText({
     model,
-    instructions: buildSystemPrompt(),
+    system: buildSystemPrompt(),
     messages: await convertToModelMessages(messages),
     tools,
     toolChoice: 'auto',
-    stopWhen: isStepCount(MAX_TOOL_STEPS),
+    stopWhen: stepCountIs(MAX_TOOL_STEPS),
     abortSignal,
 })
 ```
@@ -268,6 +268,7 @@ Tool execution follows these rules:
 - The mutation gate serializes state changes in tool-call order, checks cancellation between calls, and prevents a second chat submission while a turn is mutating state.
 - The prompt asks for one mutating tool per model step. If a model emits several, serialization preserves safety, but later calls must not assume success until their own preconditions pass.
 - The loop stops on a final text response, cancellation, approval request, or the hard step/tool-call limit. Reaching a limit is reported as partial completion, never success.
+- A failed mutation may be retried only with materially corrected input supported by the tool result; never blindly repeat the same call.
 - Completed mutations are not rolled back when a later tool fails. The transcript preserves every successful, failed, cancelled, and no-match tool result.
 - Retries or React rerenders must not execute the same `toolCallId` twice. Once a turn has a successful mutating result, transport retry/regeneration must not replay that turn automatically.
 
@@ -293,22 +294,22 @@ V1 tools can default to all currently selected structures, matching existing man
 - Disclose the model's expected download size, storage use, and approximate GPU-memory requirement before download, and require an explicit user action.
 - Enforce client-side message length, history length, context size, generation token limits, and timeouts to bound local memory and GPU use.
 - Keep conversation text and Viewer context in memory by default. Do not include either in Mol* snapshots, analytics, or model preference storage.
-- Validate every model response in the browser even when the provider uses structured output.
-- Reject unknown command kinds, properties, presets, themes, formats, and selection keys.
+- Validate every tool call against its canonical `inputSchema` before `execute`, then enforce semantic and application-policy checks inside the tool.
+- Register a closed tool map. Reject unknown tool names, unknown properties, presets, themes, formats, sources, and selection keys.
 - Validate PDB IDs and normalize them to uppercase. Use the existing loader for provider URL construction.
-- For `load-url`, allow only `https:` by default. Applications should configure an origin allowlist or require a visible confirmation for an untrusted origin to limit SSRF-like proxying, credential leakage, and unexpectedly large downloads.
+- For `download_structure_from_url`, allow only `https:` by default. Applications should configure an origin allowlist or require a visible tool approval for an untrusted origin to limit credential leakage and unexpectedly large downloads.
 - Put limits on schema item count and residue ranges. Reject non-finite numbers and pathological ranges before constructing a selection.
 - Do not render raw model HTML. Reuse `Markdown`, which sets `skipHtml`.
-- Abort generation on Cancel or component disposal. Do not start a second generation or execution while commands are mutating state; either disable submit or queue requests explicitly.
+- Abort generation on Cancel or component disposal. Do not start a second generation while tools are mutating state; disable submission until the mutation gate is idle.
 - Use Mol* tasks and busy state for long operations. Convert thrown values to safe user-facing errors while retaining detail in `plugin.log.error`.
-- Ask for confirmation before destructive commands such as clearing the entire plugin or replacing existing structures. Those commands are intentionally absent from v1.
-- Treat an assistant message as proposed intent, not proof of execution. Append execution results after commands finish and phrase the final UI status from actual results.
+- Ask for confirmation before destructive tools such as clearing the entire plugin or replacing existing structures. Those tools are intentionally absent from v1. Use the AI SDK approval flow for tools or inputs that require confirmation.
+- Treat assistant text as commentary, not proof of execution. Render tool-result parts directly and derive final UI status from them.
 
 ## Implementation Steps
 
 ### 0. Render A Dummy Chat Control In The Viewer
 
-Start with a UI-only vertical slice before adding the protocol, command executor, model setup, or Vercel AI SDK dependencies.
+Start with a UI-only vertical slice before adding the tool protocol, Mol* operation helpers, model setup, or Vercel AI SDK dependencies.
 
 Create the initial `src/extensions/chat/behavior.ts`, `ui.tsx`, `style.scss`, and `index.ts`. Export `ChatExtension`, register `ChatControls` in `ctx.customImportControls`, add `'chat': PluginSpec.Behavior(ChatExtension)` to `src/apps/viewer/extensions.ts`, and include the stylesheet from `src/apps/viewer/index.ts`.
 
@@ -321,28 +322,39 @@ The dummy `ChatControls` should:
 - Use only existing Mol* React controls and styles plus a small extension stylesheet.
 - Register and unregister cleanly with the behavior lifecycle.
 
-Do not install `ai`, `@ai-sdk/react`, or `@browser-ai/web-llm` in this step. Do not add model settings, model downloads, workers, `localStorage`, network calls, command parsing, or mutations of Viewer state. The purpose is to validate placement, collapse behavior, scrolling, responsive layout, extension enable/disable behavior, and the existing Viewer build before introducing the functional layers.
+Do not install `ai`, `@ai-sdk/react`, or `@browser-ai/web-llm` in this step. Do not add model settings, model downloads, workers, `localStorage`, network calls, tool definitions, or mutations of Viewer state. The purpose is to validate placement, collapse behavior, scrolling, responsive layout, extension enable/disable behavior, and the existing Viewer build before introducing the functional layers.
 
-### 1. Add Protocol And Validation
+### 1. Add Toolless In-Browser Chat
 
-Create `src/extensions/chat/protocol.ts` containing the V1 request, response, command, selection, context, and result types. Create `src/extensions/chat/validation.ts` with strict, dependency-free runtime validation and normalization.
+Turn the dummy panel into a real text-only chat before exposing any Mol* capability. Add compatible pinned versions of `ai`, `@ai-sdk/react`, and `@browser-ai/web-llm`; target the documented AI SDK v6 pairing described above and verify React peer requirements against this repository's React 18 build.
 
-Validation should return actionable errors with a JSON path, for example `commands[1].target.schema.auth_seq_id must be an integer`. Unit-test valid commands, each union member, unknown fields, invalid enum values, overlong arrays/strings, URL schemes, and numeric/range limits.
+Create `src/extensions/chat/model.ts` to own the supported model allowlist, WebGPU capability checks, model construction, availability, download progress, and lifecycle. Create `src/extensions/chat/worker.ts` with `WebWorkerMLCEngineHandler`, and construct the selected model through `webLLM(modelId, { worker })`. Model initialization and download must remain explicit user actions.
 
-Do this before any model integration. Fixture JSON can drive the executor and UI during development.
-
-### 2. Implement The Mol* Command Executor
-
-Create `src/extensions/chat/executor.ts` with one public entry point:
+Create a first `src/extensions/chat/transport.ts` as a custom AI SDK `ChatTransport`. It converts bounded `UIMessage` history to model messages and calls `streamText` with the local model, an abort signal, and a tool-free system prompt:
 
 ```ts
-executeChatCommands(plugin: PluginContext, commands: ChatCommandV1[], signal?: AbortSignal): Promise<ChatCommandResult[]>
+const result = streamText({
+    model,
+    system: buildToollessSystemPrompt(),
+    messages: await convertToModelMessages(messages),
+    abortSignal,
+})
 ```
 
-Map commands as follows:
+Do not pass `tools`, Viewer context, molecular state, or operation instructions in this milestone. The system prompt must state that this is a conversational preview and that it cannot inspect or modify the Viewer. Assistant text must not imply that molecular actions were performed.
 
-- `load-pdb` to `loadPdb` from `src/extensions/plugin/loaders.ts`.
-- `load-url` to `loadStructureFromUrl`, after local URL/format policy checks.
+Use `useChat` for the transcript, submission, streaming status, cancellation, and errors. Add the supported-model selector, explicit Download/Initialize action, progress, basic compatibility/error states, clear conversation, and the local-inference privacy note. Create the initial controller for model setup, transport lifecycle, and disposal, and persist only the allowlisted model preference through the storage abstraction.
+
+Test the transport and UI with a mock language model; normal tests must not download weights. Add one manual supported-browser check that downloads an allowlisted model, sends a plain conversational prompt, streams a response, cancels a response, reloads, and reuses the cached model. Verify that no Mol* state can change from chat in this milestone.
+
+### 2. Implement Bounded Mol* Operations
+
+Create `src/extensions/chat/protocol.ts` for shared V1 input/output types, allowlists, error codes, and `MolstarToolResultV1`. Create `src/extensions/chat/operations.ts` with one function per future tool, plus `state-tree.ts` for the bounded read-only state summary. These functions are ordinary typed application functions; they neither parse model text nor dispatch a command union.
+
+Map operations as follows:
+
+- Structure sources to `loadPdb`, `loadAlphaFoldDb`, and `loadModelArchive` from `src/extensions/plugin/loaders.ts`.
+- Explicit URLs to `loadStructureFromUrl`, after local URL/format policy checks.
 - Built-in selections to `StructureSelectionQueries` and `StructureSelectionManager.fromSelectionQuery`.
 - Element selections to `StructureElement.Schema.toLoci` or `applyStructureInteractivity`.
 - Focus/highlight to `applyStructureInteractivity` or the camera/interactivity managers.
@@ -352,42 +364,47 @@ Map commands as follows:
 - Camera reset to `PluginCommands.Camera.Reset`.
 - Undo to `plugin.runTask(plugin.state.data.undo())`, only when `state.data.canUndo` is true.
 
-Before each command, check required preconditions such as at least one loaded structure. After selection, use manager statistics to report zero matches rather than claiming success. Check `signal.aborted` between commands. Avoid one transaction around network loads; use existing loader transactions, then group adjacent representation/theme mutations when practical.
+Every operation checks current-state preconditions, cancellation, and policy immediately before mutation and returns an observed structured result. After selection, use manager statistics to distinguish `succeeded` from `no-match`. Avoid one transaction around network loads; use existing loader transactions. Extract the non-UI quick-style functions from `src/mol-plugin-ui/structure/quick-styles.tsx` into a reusable plugin-state/helper module so chat tools and buttons cannot drift.
 
-Extract the non-UI quick-style functions from `src/mol-plugin-ui/structure/quick-styles.tsx` into a reusable plugin-state/helper module rather than importing UI code into the executor. Keep the current buttons calling the same extracted functions so chat and buttons cannot drift.
+### 3. Add The AI SDK Tool Catalog
 
-### 3. Add The In-Browser Model, Transport, And Controller
+Using the core `ai` dependency introduced by the tool-free chat milestone, create `src/extensions/chat/tools.ts`. Define every V1 operation with `tool({ description, inputSchema, execute })`; use AI SDK `jsonSchema` and the shared protocol types. Create `src/extensions/chat/mutation-gate.ts` for serialization, cancellation barriers, per-turn limits, and exactly-once `toolCallId` handling.
 
-Add compatible pinned versions of `ai`, `@ai-sdk/react`, and `@browser-ai/web-llm`. Keep these versions aligned because the provider major version tracks the Vercel AI SDK major version and the `ChatTransport`/`UIMessage` APIs evolve together. Verify React peer requirements against this repository's React 18 build.
+Schema and tool tests should cover:
 
-Create `src/extensions/chat/model.ts` to own the supported model allowlist, capability checks, model construction, availability, download progress, and lifecycle. Create `src/extensions/chat/worker.ts` with `WebWorkerMLCEngineHandler`, and construct the selected model through `webLLM(modelId, { worker })`. Do not initialize or download the model until the user explicitly chooses to do so.
+- Valid input and result fixtures for every tool.
+- Unknown properties and tool names, invalid enums, overlong strings/arrays, non-finite numbers, URL schemes, and residue-range limits.
+- Normalization of PDB/source identifiers and current-registry checks for URL formats.
+- State preconditions, no-match selections, stable error codes, cancellation boundaries, serialization, step/tool-call budgets, and duplicate `toolCallId`s.
+- A direct fixture that invokes tool `execute` functions without a real model, proving that the tool boundary works before WebLLM integration.
 
-Create `src/extensions/chat/transport.ts` as a custom AI SDK `ChatTransport`. Its `sendMessages` implementation converts bounded `UIMessage` history into model messages, adds the system prompt and Viewer context, and invokes AI SDK Core:
+### 4. Enable Tools In The Transport And Controller
+
+Evolve the tool-free `ChatTransport`. Its `sendMessages` implementation still converts bounded `UIMessage` history into model messages, but now adds the V1 system instructions and tiny initial state summary, creates the V1 tool map, and invokes AI SDK Core with a bounded tool loop:
 
 ```ts
-const result = await generateText({
+const result = streamText({
     model,
-    system: buildSystemPrompt(context),
+    system: buildSystemPrompt(),
     messages,
-    output: Output.object({
-        name: 'molstar_chat_response_v1',
-        schema: chatResponseV1Schema,
-    }),
+    tools: createMolstarTools(toolContext),
+    toolChoice: 'auto',
+    stopWhen: stepCountIs(MAX_TOOL_STEPS),
     abortSignal,
 })
 ```
 
-Use an AI SDK-compatible JSON Schema adapter backed by the same V1 schema used by local validation; do not maintain an unrelated hand-written schema. The transport can emit typed model-download progress data parts, then emits the validated `message` and command envelope only after generation completes. Commands execute only after the complete envelope passes the local strict validator. Treat unsupported WebGPU, download/storage failure, worker failure, model initialization failure, cancellation, missing output, invalid objects, and timeouts as typed transport errors. Do not execute partial structured output.
+Use the exact API names from the pinned AI SDK version; the example above follows the AI SDK v6 shape documented by `@browser-ai/web-llm` v2. Do not mix it with v7 names or packages without updating the transport and tests together. The transport can emit typed model-download progress data parts, then merges the `streamText` UI-message stream so tool input, approval, output, error, and final-text parts retain their AI SDK types. Treat unsupported WebGPU, download/storage failure, worker failure, model initialization failure, cancellation, invalid tool input, unknown tool, step-limit exhaustion, and timeouts as distinct typed errors. Never execute partial streamed tool input.
 
-In `src/extensions/chat/ui.tsx`, use `useChat` from `@ai-sdk/react` with this transport for messages, `sendMessage`, `regenerate`, `stop`, error state, and request status. Keep text input state local because current `useChat` does not own it. Use the hook's data/finish callbacks to hand a validated command envelope to `ChatController` exactly once. Give each completed envelope a stable response ID and have the controller deduplicate it so React rerenders, retries, or repeated callbacks cannot execute commands twice.
+Extend the existing `useChat` UI to render tool calls, results, errors, and approvals from `message.parts`. Do not add a second callback that executes operations after generation, because tool `execute` functions already did so. Disable regeneration after any successful mutating tool result unless a future design can prove replay safety.
 
-Create `src/extensions/chat/controller.ts` to own Viewer context construction, sequential command execution, execution results, and disposal. It no longer duplicates conversation or transport state already owned by `useChat`; its RxJS state is limited to Mol* execution status/results needed outside the hook. Keep a bounded in-memory AI SDK message list and do not place it in Mol* snapshots by default because it may contain private user text.
+Extend the controller to own tool policy and the mutation gate in addition to model setup, transport lifecycle, and disposal. It does not duplicate conversation state or execute a command envelope; its observable state is limited to model readiness, download progress, and Mol* mutation status needed outside `useChat`. Keep a bounded in-memory AI SDK message list and do not place it in Mol* snapshots by default because it may contain private user text.
 
-Keep the model factory and transport injectable so tests can use AI SDK mock models without downloading weights and an optional remote provider can be added later without changing the validator or executor.
+Keep the model factory, operation functions, and transport injectable so tests can use AI SDK mock models without downloading weights and an optional remote provider can be added later without changing tool contracts.
 
-### 4. Expand The Reusable Chat Behavior
+### 5. Expand The Reusable Chat Behavior
 
-Expand the `ChatExtension` behavior scaffold from Step 0 to create and dispose the functional controller. Its parameters should include application policy rather than user credentials:
+Expand the tool-free `ChatExtension` behavior from Step 1 so the existing controller also receives tool policy and the mutation gate. Its parameters should include application policy rather than user credentials:
 
 - The versioned model-preference `localStorage` key, with a collision-resistant default.
 - The allowlisted model IDs and default model suggestion.
@@ -395,7 +412,7 @@ Expand the `ChatExtension` behavior scaffold from Step 0 to create and dispose t
 - Maximum context/history and generation sizes.
 - Whether confirmation is required for external structure URLs.
 
-Keep the Step 0 `customImportControls` registration under a unique key such as `molstar-chat`. On `unregister`, unmounting the control must now stop the AI SDK transport request; also abort pending command execution, dispose subjects/subscriptions, delete the `customImportControls` entry, and remove stored state.
+Keep the Step 0 `customImportControls` registration under a unique key such as `molstar-chat`. On `unregister`, unmounting the control must now stop the AI SDK transport request; also abort pending tool execution where the underlying Mol* task permits it, dispose subjects/subscriptions, delete the `customImportControls` entry, and remove stored state.
 
 Export the reusable browser feature from `src/extensions/chat/index.ts`. Keep it independent of `src/apps/viewer` so other plugin specs can register it without importing the Viewer application.
 
@@ -407,17 +424,17 @@ The Step 0 Viewer registration remains:
 
 This makes chat available through the existing `ViewerOptions.extensions` and `disabledExtensions` mechanism. Because the default extension list includes every `ExtensionMap` key, chat is enabled in the standard Viewer unless an embedder disables `'chat'`. On first use, the panel checks compatibility and asks the user to choose and download a supported model; registering the behavior or expanding the panel must not initiate a download.
 
-### 5. Replace The Dummy Panel With The Functional Chat UI
+### 6. Add The Tool-Enabled Chat UI
 
-Evolve the Step 0 `ChatControls` shell without changing its Home-panel placement, header, or collapsed-by-default behavior. Keep it reusable: chat state comes from Vercel AI SDK's `useChat`, Mol* execution state comes from the controller/plugin context, and the component contains no application bootstrap or provider-specific request logic. The expanded panel should contain:
+Evolve the tool-free `ChatControls` without changing its Home-panel placement, header, or collapsed-by-default behavior. Keep it reusable: chat state comes from Vercel AI SDK's `useChat`, Mol* execution state comes from the controller/plugin context, and the component contains no application bootstrap or provider-specific request logic. The expanded panel should contain:
 
-- Scrollable transcript with user, assistant, execution-result, and error messages.
+- Scrollable transcript with user text, assistant text, tool calls/results, approvals, and errors.
 - Sanitized Markdown for assistant text.
 - Multi-line input with Submit and Cancel.
 - Enter to submit and Shift+Enter for a newline.
 - Busy state tied to request/execution state and compatible with plugin task overlays.
-- Per-command status summaries, including partial failure and zero-match selection.
-- Retry for transport failures without automatically replaying already executed commands.
+- Per-tool status summaries, including partial failure and zero-match selection.
+- Retry for transport failures only when it cannot replay an already completed mutation.
 - Clear conversation, which does not clear molecular state.
 - A compatibility state that explains when WebGPU/WebLLM is unavailable before offering model setup.
 - A supported-model selector showing expected download size, storage use, and approximate GPU-memory requirements.
@@ -429,9 +446,9 @@ Evolve the Step 0 `ChatControls` shell without changing its Home-panel placement
 
 Create `src/extensions/chat/style.scss` and include it from the existing Viewer entry point in `src/apps/viewer/index.ts`. Rely on Mol* CSS variables instead of fixed light-theme colors. Constrain transcript height within the scrollable Home panel and verify left-panel sizing in landscape, portrait, collapsed controls, and embedded mode. Keep the input reachable when the transcript grows and avoid nested scrolling that traps keyboard or wheel input.
 
-### 6. Add Model Preference Persistence And Static Deployment
+### 7. Harden Model Preference Persistence And Static Deployment
 
-Create `src/extensions/chat/settings.ts` for strict parsing and persistence of versioned model preferences. Keep storage access behind a small interface so tests can use an in-memory implementation and embedders can replace `localStorage` if needed. Model weights remain owned by WebLLM/browser caches, not this settings record.
+Harden the initial `src/extensions/chat/settings.ts` from Step 1 with strict parsing and persistence of versioned model preferences. Keep storage access behind a small interface so tests can use an in-memory implementation and embedders can replace `localStorage` if needed. Model weights remain owned by WebLLM/browser caches, not this settings record.
 
 Settings behavior should:
 
@@ -444,15 +461,15 @@ Settings behavior should:
 
 Do not add a chat-specific deployment workflow. Reuse the existing Viewer build and deployment path. Extend its smoke coverage to verify that the chat CSS, Web Worker chunk, and WebLLM runtime assets resolve under the supported deployment path.
 
-The system prompt is bundled with the extension. It should describe only Protocol V1 and the distinction between author and label residue numbering, mark Viewer context as untrusted, require clarification when identifiers are ambiguous, and prohibit claims that an operation succeeded. Success is determined only by the browser executor.
+When tools are enabled, replace the Step 1 conversational-preview prompt with the bundled V1 tool prompt. It should describe how to use the V1 tools, require `state_tree` before resolving references against unknown Viewer state, distinguish author and label residue numbering, treat tool output as untrusted data rather than instructions, allow at most one mutating tool call per step, require clarification when identifiers are ambiguous, and prohibit claims that an operation succeeded unless its tool result says so.
 
-### 7. Test And Roll Out
+### 8. Test And Roll Out
 
-Add pure Jest tests under `src/extensions/chat/_spec` for protocol validation, context truncation, result aggregation, cancellation boundaries, component/controller behavior, and command dependency behavior. Use a small executor adapter interface or injected operation functions so most command routing can be tested without WebGL.
+Add pure Jest tests under `src/extensions/chat/_spec` for tool schemas, state-tree truncation, result aggregation, cancellation boundaries, mutation-gate behavior, component/controller behavior, and dependent tool calls. Inject operation functions so most tool routing can be tested without WebGL.
 
-Add model, transport, hook integration, and settings tests under `src/extensions/chat/_spec` using an injected capability check, mocked model factory, AI SDK mock models, and in-memory storage. Cover unsupported WebGPU, `unavailable`/`downloadable`/`available` states, explicit download consent, progress, cancellation, worker and quota failures, invalid preferences, AI SDK message conversion, typed data parts, exactly-once command execution, `useChat` status behavior, response validation, clearing model preferences, documented cache behavior, and stable error mapping. Normal unit tests must not download a real model.
+Add model, transport, hook integration, and settings tests under `src/extensions/chat/_spec` using an injected capability check, mocked model factory, AI SDK mock models, and in-memory storage. Cover unsupported WebGPU, `unavailable`/`downloadable`/`available` states, explicit download consent, progress, cancellation, worker and quota failures, invalid preferences, AI SDK message conversion, typed tool/data parts, exactly-once tool execution, bounded multi-step behavior, approval flow, `useChat` status behavior, malformed tool input, unknown tools, clearing model preferences, documented cache behavior, and stable error mapping. Normal unit tests must not download a real model.
 
-Add a Viewer smoke test that serves `build/viewer`, confirms the chat extension and worker chunk are present, injects a mock in-browser language model, and completes one validated command response. Reuse any existing non-root-path deployment fixture rather than downloading model weights in the normal smoke test.
+Add a Viewer smoke test that serves `build/viewer`, confirms the chat extension and worker chunk are present, injects a mock in-browser language model, and completes one validated tool call plus result. Reuse any existing non-root-path deployment fixture rather than downloading model weights in the normal smoke test.
 
 Add focused integration tests with a lightweight `PluginContext` where feasible for:
 
@@ -460,7 +477,7 @@ Add focused integration tests with a lightweight `PluginContext` where feasible 
 - A selection that matches zero elements.
 - Applying a preset and color theme and observing the expected state transforms.
 - Undo after a visual mutation.
-- One failed command followed by dependent-command skipping.
+- A failed `download_structure` result followed by the model not attempting a dependent selection.
 - Controller disposal aborting an in-flight request.
 
 Add browser/manual scenarios for UI behavior and real network loading:
@@ -468,8 +485,8 @@ Add browser/manual scenarios for UI behavior and real network loading:
 1. Load `1TQN`, select chain A residues 25-40, focus, then apply cartoon.
 2. Load two structures and verify an ambiguous request causes clarification instead of silently targeting one.
 3. Apply illustrative style and undo it.
-4. Submit malformed model JSON and verify no state mutation occurs.
-5. Cancel during model download, slow generation, and a multi-command sequence.
+4. Submit a malformed or unknown tool call and verify no state mutation occurs.
+5. Cancel during model download, slow generation, and a multi-tool sequence.
 6. Exercise the collapsible chat in the left-side Home panel across desktop, narrow/portrait, expanded, and embedded layouts.
 7. On a supported browser, explicitly download the selected test model, observe progress, reload, and verify the cached model is reused.
 8. Verify prompts and Viewer context never leave the browser during inference and never appear in `localStorage`, logs, analytics, or snapshots.
@@ -487,14 +504,15 @@ npm run build:apps
 
 ## Suggested File Changes
 
-Milestone 0 uses only the initial `behavior.ts`, `ui.tsx`, `style.scss`, and `index.ts` files plus the two Viewer registration/style imports. The remaining files and package dependencies are introduced in later milestones.
+Milestone 0 uses only the initial `behavior.ts`, `ui.tsx`, `style.scss`, and `index.ts` files plus the two Viewer registration/style imports. Milestone 1 adds the model, worker, tool-free transport/controller, initial settings, functional chat UI, and AI SDK dependencies. The protocol, operations, state-tree, tool registry, and mutation gate arrive only in Milestone 2.
 
 New files:
 
 - `src/extensions/chat/protocol.ts`
-- `src/extensions/chat/validation.ts`
-- `src/extensions/chat/context.ts`
-- `src/extensions/chat/executor.ts`
+- `src/extensions/chat/operations.ts`
+- `src/extensions/chat/state-tree.ts`
+- `src/extensions/chat/tools.ts`
+- `src/extensions/chat/mutation-gate.ts`
 - `src/extensions/chat/model.ts`
 - `src/extensions/chat/worker.ts`
 - `src/extensions/chat/transport.ts`
@@ -504,8 +522,9 @@ New files:
 - `src/extensions/chat/ui.tsx`
 - `src/extensions/chat/style.scss`
 - `src/extensions/chat/index.ts`
-- `src/extensions/chat/_spec/validation.spec.ts`
-- `src/extensions/chat/_spec/executor.spec.ts`
+- `src/extensions/chat/_spec/operations.spec.ts`
+- `src/extensions/chat/_spec/tools.spec.ts`
+- `src/extensions/chat/_spec/mutation-gate.spec.ts`
 - `src/extensions/chat/_spec/model.spec.ts`
 - `src/extensions/chat/_spec/transport.spec.ts`
 - `src/extensions/chat/_spec/settings.spec.ts`
@@ -530,39 +549,49 @@ Avoid changing `PluginUISpec`, the core layout, or `LeftPanelTabName` for the fi
 - The control starts collapsed and expands to a clearly labeled dummy chat layout with a static transcript, multiline input, and non-functional Send button.
 - Disabling `'chat'` through normal Viewer extension options removes the control, and unregistering the behavior cleans up its `customImportControls` entry.
 - Desktop, narrow/portrait, and embedded layouts remain usable, including Home-panel scrolling.
-- No Vercel AI SDK packages, model configuration, persistence, model downloads, workers, command protocol, or molecular actions are included yet.
+- No Vercel AI SDK packages, model configuration, persistence, model downloads, workers, tool protocol, or molecular actions are included yet.
 - Lint and the existing Viewer build pass.
 
-### Milestone 1: Deterministic Local Prototype
+### Milestone 1: Toolless In-Browser Chat
 
-- Protocol, validator, context builder, and executor exist.
-- The dummy panel can be wired to a developer fixture that submits JSON commands without an LLM.
+- The dummy transcript becomes a working text-only chat backed by an allowlisted `@browser-ai/web-llm` model, the custom client-side transport, and `useChat`.
+- The UI checks WebGPU support and requires an explicit Download/Initialize action with progress before local inference begins.
+- Inference runs in the Web Worker, supports streaming and cancellation, and reuses cached model assets after reload.
+- The transcript supports user/assistant text, request status, clear conversation, and actionable model/download/worker errors.
+- The selected model preference may persist, but conversation content does not.
+- No AI SDK tools are registered, no Viewer context or molecular state is sent to the model, and chat cannot inspect or mutate Mol* state.
+- Mock-model tests and a Viewer smoke test cover the tool-free transport and UI without downloading real model weights.
+
+### Milestone 2: Deterministic Local Tool Prototype
+
+- Protocol types, operation helpers, `state_tree`, the AI SDK tool catalog, and the mutation gate exist.
+- A developer-only fixture can invoke typed tools directly, without asking the language model to call them.
 - Load, selection/focus, preset, color, appearance, camera reset, and undo work.
-- Core validation and executor tests pass.
+- Tool-schema, operation, result, cancellation, and serialization tests pass.
 
-### Milestone 2: End-To-End In-Browser Chat
+### Milestone 3: End-To-End Tool-Enabled Chat
 
-- `@browser-ai/web-llm`, the custom AI SDK transport, `useChat` integration, controller, and responsive chat UI exist.
+- The tool-free chat transport is extended with the V1 tool registry, bounded multi-step execution, structured tool results, and approvals.
 - `ChatExtension` is registered in the existing Viewer `ExtensionMap` and can be enabled or disabled through normal Viewer options.
-- The UI checks WebGPU support and offers only allowlisted model IDs tested for Protocol V1 generation.
+- The UI offers only allowlisted model IDs tested specifically for Protocol V1 tool calling.
 - Model download is opt-in, cancellable, and reports expected size, progress, storage use, and hardware requirements.
 - Inference runs in a Web Worker so model initialization and generation do not block Mol* rendering.
 - After assets are cached, chat works without an inference endpoint or API token.
-- Lightweight model preferences persist in `localStorage`; prompts, conversation history, Viewer context, and generated commands do not.
+- Lightweight model preferences persist in `localStorage`; prompts, conversation history, Viewer context, and tool calls/results do not.
 - The existing static Viewer build includes chat and continues to work in its supported deployment environments without a chat backend.
 - Cancellation, errors, partial results, and zero matches are visible and accurate.
 - WebGPU, GPU-memory, download, storage-quota, worker, initialization, generation, and malformed-output failures are distinguishable and actionable.
 
-### Milestone 3: Hardening And Expansion
+### Milestone 4: Hardening And Expansion
 
 - Multi-structure targeting and clarification are reliable.
 - Confirmation policy covers untrusted URLs and any newly introduced destructive action.
-- Telemetry records latency/error/command-kind aggregates only with host consent and without message content by default.
-- Add new molecular commands one at a time with protocol, validation, executor, and tests updated together.
+- Telemetry records latency/error/tool-name aggregates only with host consent and without message content by default.
+- Add new molecular tools one at a time with schema, operation, result, and tests updated together.
 
 ### Stretch Milestone: OpenAI-Compatible Provider
 
-- An optional `@ai-sdk/openai` model factory supports a user-configured OpenAI-compatible endpoint, model, and optional token through the same transport/validator/executor boundary.
+- An optional `@ai-sdk/openai` model factory supports a user-configured OpenAI-compatible endpoint, model, and optional token through the same transport/tool boundary.
 - Endpoint and credential settings are versioned, validated, redacted from logs and snapshots, and removable from browser storage.
 - HTTPS/loopback rules, redirect rejection, CORS diagnostics, authentication errors, and credential-origin restrictions are tested.
 - A remote provider is never contacted automatically; users explicitly choose it when local inference is unavailable or undesirable.
@@ -570,8 +599,8 @@ Avoid changing `PluginUISpec`, the core layout, or `LeftPanelTabName` for the fi
 ## Acceptance Criteria
 
 - A user can perform the three requested categories: load a PDB structure, make/focus a selection, and apply common visual styles from natural-language chat.
-- Invalid or hallucinated command output cannot call arbitrary plugin APIs or partially bypass validation.
-- Every executed command has an observable success, failure, skipped, or zero-match result.
+- Invalid or hallucinated tool calls cannot call arbitrary plugin APIs or bypass schema, semantic, or policy validation.
+- Every executed tool has an observable succeeded, failed, cancelled, or no-match result; unexpected exceptions appear as tool errors.
 - Existing manual controls continue to work and share implementation with chat where behavior overlaps.
 - Visual state mutations use Mol* transactions and are undoable where the underlying state system supports undo.
 - Selection behavior clearly documents its separate undo/history semantics.
@@ -580,7 +609,7 @@ Avoid changing `PluginUISpec`, the core layout, or `LeftPanelTabName` for the fi
 - Chat appears as a collapsed-by-default control in the left-side Home panel alongside the existing download/import controls, not in Structure Tools.
 - The UI works in desktop and narrow layouts and uses existing Mol* visual conventions.
 - A supported local model can be explicitly downloaded, initialized, and used through `@browser-ai/web-llm`; no API endpoint or token is required.
-- Chat lifecycle/state use `useChat` from `@ai-sdk/react`, while inference and structured generation run locally through the Vercel AI SDK provider boundary.
+- Chat lifecycle/state use `useChat` from `@ai-sdk/react`, while inference and bounded tool calling run locally through the Vercel AI SDK provider boundary.
 - Model weights are not bundled, downloads show progress, inference runs in a worker, and cached assets are reused where supported.
 - Unsupported WebGPU, insufficient resources, model-download, storage, worker, timeout, cancellation, and malformed-response failures are distinguishable and actionable.
 - The built Viewer includes the chat extension without introducing another application target or backend.
