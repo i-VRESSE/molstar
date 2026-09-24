@@ -2,14 +2,26 @@
  * Copyright (c) 2026 mol* contributors, licensed under MIT, See LICENSE file for more info.
  */
 
-import { ChatRequestOptions, ChatTransport, convertToModelMessages, LanguageModel, ToolLoopAgent, UIMessage, UIMessageChunk } from 'ai';
+import { ChatRequestOptions, ChatTransport, convertToModelMessages, LanguageModel, stepCountIs, ToolLoopAgent, UIMessage, UIMessageChunk } from 'ai';
 import { ChatModelError, shouldDisableThinkingForModel, toChatModelError } from './model';
+import { createMolstarTools } from './tools';
 
 export const MaxChatMessages = 24;
 export const MaxChatMessageLength = 2000;
 export const MaxChatHistoryLength = 16_000;
 export const MaxChatOutputTokens = 512;
 export const ChatGenerationTimeoutMs = 120_000;
+
+export function buildToolSystemPrompt(): string {
+    return [
+        'You are the Mol* Viewer assistant. You can use only the registered tools.',
+        'Use the version tool to report the current Mol* version and loadPDB to load a four-character or extended PDB ID.',
+        'Use at most one state-changing tool per step. Read its result before deciding what to do next.',
+        'Never claim an operation succeeded unless its tool result confirms it.',
+        'For Viewer actions with no registered tool, explain that the action is unavailable.',
+        'Answer concisely.',
+    ].join(' ');
+}
 
 export function buildToollessSystemPrompt(): string {
     return [
@@ -36,6 +48,7 @@ export class MolstarChatTransport implements ChatTransport<UIMessage> {
     constructor(
         private readonly getModel: () => LanguageModel | undefined,
         private readonly options: MolstarChatTransportOptions = {},
+        private readonly tools?: ReturnType<typeof createMolstarTools>,
     ) { }
 
     async sendMessages(options: {
@@ -65,7 +78,9 @@ export class MolstarChatTransport implements ChatTransport<UIMessage> {
             const prompt = await convertToModelMessages(messages);
             const agent = new ToolLoopAgent({
                 model,
-                instructions: buildToollessSystemPrompt(),
+                instructions: this.tools ? buildToolSystemPrompt() : buildToollessSystemPrompt(),
+                tools: this.tools,
+                stopWhen: stepCountIs(8),
                 maxOutputTokens: this.options.maxOutputTokens ?? MaxChatOutputTokens,
                 maxRetries: 0,
                 ...(typeof model !== 'string' && shouldDisableThinkingForModel(model.modelId) ? {

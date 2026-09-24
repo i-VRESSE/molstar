@@ -3,6 +3,7 @@
  */
 
 import { PluginBehavior } from '../../mol-plugin/behavior/behavior';
+import { PluginUIContext } from '../../mol-plugin-ui/context';
 import { ChatController, deleteChatController, setChatController } from './controller';
 import { ChatControls } from './ui';
 
@@ -18,7 +19,7 @@ export const ChatExtension = PluginBehavior.create<{}>({
         private controller: ChatController | undefined;
 
         register(): void {
-            this.controller = new ChatController();
+            this.controller = new ChatController({ plugin: this.ctx as PluginUIContext });
             setChatController(this.ctx, this.controller);
             this.ctx.customImportControls.set(ChatControlsKey, ChatControls as any);
         }

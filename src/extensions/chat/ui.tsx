@@ -84,7 +84,7 @@ export function ChatPanel({ controller }: { controller: ChatController }) {
             <div className='msp-chat-transcript' ref={transcript} role='log' aria-label='Chat transcript' aria-live='polite'>
                 {messages.length === 0 && <div className='msp-chat-message'>
                     <strong className='msp-chat-message-role'>Assistant</strong>
-                    This is a text-only conversational preview. It cannot inspect or change the Viewer.
+                    {controller.hasTools ? 'Ask for the Mol* version or load a PDB ID.' : 'This is a text-only conversational preview. It cannot inspect or change the Viewer.'}
                 </div>}
                 {messages.map(message => <div className={`msp-chat-message msp-chat-message-${message.role}`} key={message.id}>
                     <strong className='msp-chat-message-role'>{message.role === 'user' ? 'You' : 'Assistant'}</strong>
@@ -92,7 +92,9 @@ export function ChatPanel({ controller }: { controller: ChatController }) {
                         ? message.role === 'assistant'
                             ? <Markdown key={index}>{part.text}</Markdown>
                             : <React.Fragment key={index}>{part.text}</React.Fragment>
-                        : null)}
+                        : part.type.startsWith('tool-')
+                            ? <ToolStatus key={index} part={part} />
+                            : null)}
                 </div>)}
                 {requestActive && <div className='msp-chat-message msp-chat-thinking' role='status'>
                     <span>Assistant is responding</span><span aria-hidden='true'>…</span>
@@ -107,7 +109,7 @@ export function ChatPanel({ controller }: { controller: ChatController }) {
                 <textarea
                     className='msp-form-control'
                     aria-label='Chat message'
-                    placeholder='Ask a conversational question…'
+                    placeholder={controller.hasTools ? 'Ask for a PDB ID or the Mol* version…' : 'Ask a conversational question…'}
                     maxLength={MaxChatMessageLength}
                     value={draft}
                     disabled={requestActive}
@@ -128,9 +130,25 @@ export function ChatPanel({ controller }: { controller: ChatController }) {
         </>}
 
         <div className='msp-chat-notice msp-help-text'>
-            <div>Local inference. Setup downloads model assets; conversations are not saved. Viewer access is disabled in this milestone.</div>
+            <div>Local inference. Setup downloads model assets; conversations are not saved. {controller.hasTools ? 'Available Viewer actions: version and PDB loading.' : 'Viewer access is disabled in this milestone.'}</div>
         </div>
     </div>;
+}
+
+function ToolStatus({ part }: { part: { type: string } }) {
+    const tool = part as { type: string, state?: string, output?: unknown, errorText?: string };
+    const name = tool.type.slice(5);
+    const output = tool.output as { status?: string, pdbId?: string } | string | undefined;
+    const summary = tool.state === 'output-error'
+        ? `${name} failed: ${tool.errorText ?? 'Unknown error'}`
+        : tool.state === 'output-available'
+            ? name === 'version' && typeof output === 'string'
+                ? `Mol* version: ${output}`
+                : name === 'loadPDB' && typeof output === 'object' && output?.status === 'succeeded'
+                    ? `Loaded PDB ${output.pdbId}.`
+                    : `${name} completed.`
+            : `${name} is running…`;
+    return <div className='msp-chat-status' role='status'>{summary}</div>;
 }
 
 function ModelSelector({ controller, state, disabled }: { controller: ChatController, state: ChatControllerState, disabled: boolean }) {

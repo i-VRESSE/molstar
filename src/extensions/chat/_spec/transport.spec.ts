@@ -3,7 +3,9 @@
  */
 
 import { LanguageModel, simulateReadableStream, UIMessage } from 'ai';
-import { boundMessages, buildToollessSystemPrompt, MolstarChatTransport } from '../transport';
+import { PluginUIContext } from '../../../mol-plugin-ui/context';
+import { boundMessages, buildToolSystemPrompt, buildToollessSystemPrompt, MolstarChatTransport } from '../transport';
+import { createMolstarTools } from '../tools';
 
 const EmptyUsage = {
     inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
@@ -81,6 +83,46 @@ describe('MolstarChatTransport', () => {
             expect(call.tools).toBeUndefined();
             expect(call.providerOptions).toEqual({ 'web-llm': { extra_body: { enable_thinking: false } } });
         }
+    });
+
+    it('passes existing Viewer tools to the agent and executes a model tool call', async () => {
+        const calls: Parameters<LanguageModel['doStream']>[0][] = [];
+        const model: LanguageModel = {
+            specificationVersion: 'v4',
+            provider: 'test',
+            modelId: 'tool-model',
+            supportedUrls: {},
+            doGenerate: async () => { throw new Error('Not used by this test.'); },
+            doStream: async options => {
+                calls.push(options);
+                const chunks = calls.length === 1 ? [
+                    { type: 'stream-start' as const, warnings: [] },
+                    { type: 'tool-call' as const, toolCallId: 'call-version', toolName: 'version', input: '{}' },
+                    { type: 'finish' as const, finishReason: { unified: 'tool-calls' as const, raw: 'tool-calls' }, usage: EmptyUsage },
+                ] : [
+                    { type: 'stream-start' as const, warnings: [] },
+                    { type: 'text-start' as const, id: 'answer' },
+                    { type: 'text-delta' as const, id: 'answer', delta: 'Version reported.' },
+                    { type: 'text-end' as const, id: 'answer' },
+                    { type: 'finish' as const, finishReason: { unified: 'stop' as const, raw: 'stop' }, usage: EmptyUsage },
+                ];
+                return { stream: simulateReadableStream({ chunks }) };
+            },
+        };
+        const plugin = {} as PluginUIContext;
+        const transport = new MolstarChatTransport(() => model, {}, createMolstarTools(plugin));
+        const stream = await transport.sendMessages({
+            trigger: 'submit-message', chatId: 'chat-1', messageId: 'user-1',
+            messages: [{ id: 'user-1', role: 'user', parts: [{ type: 'text', text: 'What version?' }] }],
+            abortSignal: void 0,
+        });
+        const chunks = await readStream(stream);
+
+        expect(calls).toHaveLength(2);
+        expect(calls[0].tools?.map(t => t.name)).toEqual(['version', 'loadPDB']);
+        expect(calls[0].prompt[0]).toMatchObject({ role: 'system', content: buildToolSystemPrompt() });
+        expect(chunks.some(chunk => chunk.type === 'tool-output-available')).toBe(true);
+        expect(chunks.some(chunk => chunk.type === 'text-delta' && chunk.delta === 'Version reported.')).toBe(true);
     });
 
     it('rejects submission before model initialization', async () => {

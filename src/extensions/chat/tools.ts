@@ -7,14 +7,17 @@ import { PLUGIN_VERSION } from '../../mol-plugin/version';
 import { PluginUIContext } from '../../mol-plugin-ui/context';
 import { loadPdb } from '../plugin/loaders';
 
-// Developer prototype for the later tool milestone. The Milestone 1 transport
-// intentionally does not import or register these tools.
+// Initial closed tool catalog. Additional Viewer operations will be added later.
+const PdbIdPattern = '^(?:[1-9][A-Za-z0-9]{3}|[Pp][Dd][Bb]_[0-9]{4}[1-9][A-Za-z0-9]{3})$';
+const PdbIdRegex = new RegExp(PdbIdPattern);
 export function createMolstarTools(plugin: PluginUIContext) {
     const tools = {
         version: tool({
             description: 'returns current molstar version',
             inputSchema: jsonSchema<{}>({
-                type: 'object'
+                type: 'object',
+                additionalProperties: false,
+                properties: {}
             }),
             execute: async (_: {}) => {
                 return PLUGIN_VERSION;
@@ -32,12 +35,16 @@ export function createMolstarTools(plugin: PluginUIContext) {
             }>({
                 type: 'object',
                 properties: {
-                    pdbId: { type: 'string' }
+                    pdbId: { type: 'string', pattern: PdbIdPattern, minLength: 4, maxLength: 12 }
                 },
-                required: ['pdbId']
+                required: ['pdbId'],
+                additionalProperties: false
             }),
             execute: async ({ pdbId }: { pdbId: string }) => {
-                return loadPdb(plugin, pdbId);
+                const id = pdbId.trim().toUpperCase();
+                if (!PdbIdRegex.test(id)) throw new Error('Invalid PDB ID.');
+                await loadPdb(plugin, id);
+                return { status: 'succeeded' as const, pdbId: id };
             }
         }),
     };

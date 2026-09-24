@@ -5,9 +5,11 @@
 import type { LanguageModel } from 'ai';
 import { BehaviorSubject } from 'rxjs';
 import { PluginContext } from '../../mol-plugin/context';
+import { PluginUIContext } from '../../mol-plugin-ui/context';
 import { BrowserChatModelFactory, ChatModelError, ChatModelErrorCode, ChatModelFactory, ChatModelHandle, SupportedChatModel, toChatModelError } from './model';
 import { ChatSettings } from './settings';
 import { MolstarChatTransport } from './transport';
+import { createMolstarTools } from './tools';
 
 export type ChatModelStatus = 'unchecked' | 'idle' | 'initializing' | 'ready' | 'unsupported' | 'error'
 
@@ -19,6 +21,7 @@ export interface ChatControllerState {
 }
 
 export interface ChatControllerOptions {
+    plugin?: PluginUIContext
     modelFactory?: ChatModelFactory
     settings?: ChatSettings
 }
@@ -40,6 +43,7 @@ export function deleteChatController(plugin: PluginContext): void {
 export class ChatController {
     readonly state: BehaviorSubject<ChatControllerState>;
     readonly transport: MolstarChatTransport;
+    readonly hasTools: boolean;
 
     private readonly modelFactory: ChatModelFactory;
     private readonly settings: ChatSettings;
@@ -56,7 +60,8 @@ export class ChatController {
             modelId: this.settings.load().modelId,
             progress: 0,
         });
-        this.transport = new MolstarChatTransport(() => this.model);
+        this.hasTools = !!options.plugin;
+        this.transport = new MolstarChatTransport(() => this.model, {}, options.plugin ? createMolstarTools(options.plugin) : undefined);
     }
 
     checkCompatibility(): void {
