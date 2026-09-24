@@ -3,7 +3,7 @@
  */
 
 import { ChatRequestOptions, ChatTransport, convertToModelMessages, LanguageModel, ToolLoopAgent, UIMessage, UIMessageChunk } from 'ai';
-import { ChatModelError, toChatModelError } from './model';
+import { ChatModelError, shouldDisableThinkingForModel, toChatModelError } from './model';
 
 export const MaxChatMessages = 24;
 export const MaxChatMessageLength = 2000;
@@ -68,6 +68,9 @@ export class MolstarChatTransport implements ChatTransport<UIMessage> {
                 instructions: buildToollessSystemPrompt(),
                 maxOutputTokens: this.options.maxOutputTokens ?? MaxChatOutputTokens,
                 maxRetries: 0,
+                ...(typeof model !== 'string' && shouldDisableThinkingForModel(model.modelId) ? {
+                    providerOptions: { 'web-llm': { extra_body: { enable_thinking: false } } },
+                } : {}),
                 experimental_telemetry: { isEnabled: false },
             });
             const result = await agent.stream({

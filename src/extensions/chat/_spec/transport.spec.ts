@@ -21,29 +21,30 @@ async function readStream<T>(stream: ReadableStream<T>): Promise<T[]> {
 }
 
 describe('MolstarChatTransport', () => {
-    it('streams a tool-free response from an injected mock model', async () => {
+    it('streams consecutive Qwen3 replies with thinking disabled', async () => {
         const doStreamCalls: Parameters<LanguageModel['doStream']>[0][] = [];
         const model: LanguageModel = {
             specificationVersion: 'v4',
-            provider: 'mock-provider',
-            modelId: 'mock-model',
+            provider: 'web-llm',
+            modelId: 'Qwen3-0.6B-q4f16_1-MLC',
             supportedUrls: {},
             doGenerate: async () => { throw new Error('Not used by this test.'); },
             doStream: async options => {
                 doStreamCalls.push(options);
+                const reply = doStreamCalls.length === 1 ? '2' : '5';
                 return {
-                stream: simulateReadableStream({ chunks: [
-                    { type: 'stream-start', warnings: [] },
-                    { type: 'text-start', id: 'text-1' },
-                    { type: 'text-delta', id: 'text-1', delta: 'Hello locally.' },
-                    { type: 'text-end', id: 'text-1' },
-                    { type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage: EmptyUsage },
-                ] }),
+                    stream: simulateReadableStream({ chunks: [
+                        { type: 'stream-start', warnings: [] },
+                        { type: 'text-start', id: 'text-1' },
+                        { type: 'text-delta', id: 'text-1', delta: reply },
+                        { type: 'text-end', id: 'text-1' },
+                        { type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage: EmptyUsage },
+                    ] }),
                 };
             },
         };
         const transport = new MolstarChatTransport(() => model);
-        const messages: UIMessage[] = [{ id: 'user-1', role: 'user', parts: [{ type: 'text', text: 'Hello' }] }];
+        const messages: UIMessage[] = [{ id: 'user-1', role: 'user', parts: [{ type: 'text', text: '1+1' }] }];
 
         const stream = await transport.sendMessages({
             trigger: 'submit-message',
@@ -54,10 +55,32 @@ describe('MolstarChatTransport', () => {
         });
         const chunks = await readStream(stream);
 
-        expect(chunks.some(chunk => chunk.type === 'text-delta' && chunk.delta === 'Hello locally.')).toBe(true);
-        expect(doStreamCalls).toHaveLength(1);
+        const nextStream = await transport.sendMessages({
+            trigger: 'submit-message',
+            chatId: 'chat-1',
+            messageId: 'user-2',
+            messages: [
+                ...messages,
+                { id: 'assistant-1', role: 'assistant', parts: [{ type: 'text', text: '2' }] },
+                { id: 'user-2', role: 'user', parts: [{ type: 'text', text: '2+3=?' }] },
+            ],
+            abortSignal: void 0,
+        });
+        const nextChunks = await readStream(nextStream);
+
+        expect(chunks.some(chunk => chunk.type === 'text-delta' && chunk.delta === '2')).toBe(true);
+        expect(nextChunks.some(chunk => chunk.type === 'text-delta' && chunk.delta === '5')).toBe(true);
+        expect(doStreamCalls).toHaveLength(2);
         expect(doStreamCalls[0].prompt[0]).toMatchObject({ role: 'system', content: buildToollessSystemPrompt() });
-        expect(doStreamCalls[0].tools).toBeUndefined();
+        expect(doStreamCalls[1].prompt.slice(1)).toMatchObject([
+            { role: 'user', content: [{ type: 'text', text: '1+1' }] },
+            { role: 'assistant', content: [{ type: 'text', text: '2' }] },
+            { role: 'user', content: [{ type: 'text', text: '2+3=?' }] },
+        ]);
+        for (const call of doStreamCalls) {
+            expect(call.tools).toBeUndefined();
+            expect(call.providerOptions).toEqual({ 'web-llm': { extra_body: { enable_thinking: false } } });
+        }
     });
 
     it('rejects submission before model initialization', async () => {

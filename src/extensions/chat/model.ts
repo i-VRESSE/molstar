@@ -24,8 +24,9 @@ type WebLLMModel = LanguageModel & {
     createSessionWithProgress(onProgress: (progress: number) => void): Promise<WebLLMModel>
 }
 
+// See https://github.com/mlc-ai/web-llm/blob/main/src/config.ts#L358 for prebuilt model configuration details.
 const SupportedChatModelInfo = {
-    'Qwen3-0.6B-q4f16_1-MLC': { name: 'Qwen3 0.6B', fallbackVramRequiredMB: 1403.34 },
+    'Qwen3-0.6B-q4f16_1-MLC': { name: 'Qwen3 0.6B', fallbackVramRequiredMB: 1403.34, no_thinking: true },
     'Ministral-3-3B-Instruct-2512-BF16-q4f16_1-MLC': { name: 'Ministral 3 3B Instruct', fallbackVramRequiredMB: 2863.69 },
 } as const;
 export type SupportedChatModel = keyof typeof SupportedChatModelInfo
@@ -44,6 +45,12 @@ export const DefaultChatModel: SupportedChatModel = SupportedChatModels[0].id;
 
 export function isSupportedChatModel(value: unknown): value is SupportedChatModel {
     return typeof value === 'string' && SupportedChatModels.some(model => model.id === value);
+}
+
+export function shouldDisableThinkingForModel(modelId: string): boolean {
+    if (!isSupportedChatModel(modelId)) return false;
+    const info = SupportedChatModelInfo[modelId];
+    return 'no_thinking' in info ? info.no_thinking : false;
 }
 
 export type ChatModelAvailability = 'unavailable' | 'downloadable' | 'downloading' | 'available'

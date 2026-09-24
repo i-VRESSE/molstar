@@ -2,7 +2,7 @@
  * Copyright (c) 2026 mol* contributors, licensed under MIT, See LICENSE file for more info.
  */
 
-import { DefaultChatModel, isSupportedChatModel, SupportedChatModels, toChatModelError } from '../model';
+import { DefaultChatModel, isSupportedChatModel, shouldDisableThinkingForModel, SupportedChatModels, toChatModelError } from '../model';
 
 describe('chat model boundary', () => {
     it('accepts only an allowlisted model ID', () => {
@@ -10,6 +10,12 @@ describe('chat model boundary', () => {
         expect(isSupportedChatModel('Ministral-3-3B-Instruct-2512-BF16-q4f16_1-MLC')).toBe(true);
         expect(isSupportedChatModel('https://example.org/arbitrary-model')).toBe(false);
         expect(isSupportedChatModel(undefined)).toBe(false);
+    });
+
+    it('defaults to thinking except for Qwen3 0.6B', () => {
+        expect(shouldDisableThinkingForModel('Qwen3-0.6B-q4f16_1-MLC')).toBe(true);
+        expect(shouldDisableThinkingForModel('Ministral-3-3B-Instruct-2512-BF16-q4f16_1-MLC')).toBe(false);
+        expect(shouldDisableThinkingForModel('unknown-model')).toBe(false);
     });
 
     it('uses VRAM-labelled options without separate requirement fields', () => {
